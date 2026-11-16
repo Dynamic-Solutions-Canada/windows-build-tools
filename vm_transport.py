@@ -1,0 +1,168 @@
+"""Run a bridge build inside the local windows-dev VM over key-only SSH.
+
+The VM has no view of the WSL checkout, so this transport snapshots the source on
+the Linux side, streams it into the VM user's TEMP/WindowsAppBuilds, runs the same
+build-staged.ps1 there, copies logs and artifacts back, and removes the VM stage.
+
+Only unsigned work is supported (compile-only and --no-sign packaging). Signed
+builds and installation would need the private dev signing key inside the VM and
+a signed-in desktop session; both stay out of scope until explicitly authorized.
+"""
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+import uuid
+
+SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
+RETURNED_FILES = ('build.log', 'console.log', 'result.json')
+
+
+DEFAULT_VM = 'windows-dev'
+
+
+def _vm_running():
+    """True when the windows-dev container is up; any Docker failure counts as not running."""
+    try:
+        state = subprocess.run(['docker', 'inspect', '-f', '{{.State.Running}}', DEFAULT_VM],
+                               capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return state.returncode == 0 and state.stdout.strip() == 'true'
+
+
+def vm_host():
+    """Return the SSH destination for the VM, or None when the VM transport does not apply.
+
+    WINDOWS_BUILD_VM selects a destination explicitly. Otherwise a running windows-dev
+    container is used automatically, so projects need no extra setting. The VM is never
+    started here: starting it reserves memory and is the caller's decision.
+    """
+    explicit = os.environ.get('WINDOWS_BUILD_VM')
+    if explicit:
+        return explicit
+    return DEFAULT_VM if _vm_running() else None
+
+
+def _ssh(host, command, **kwargs):
+    """Run one command in the VM. Windows OpenSSH hands it to cmd.exe."""
+    return subprocess.run(['ssh', *SSH_OPTIONS, host, command], **kwargs)
+
+
+def _pwsh(host, script, **kwargs):
+    """Run a short PowerShell 7 snippet in the VM and return the completed process."""
+    return _ssh(host, f'pwsh -NoProfile -NonInteractive -Command "{script}"', **kwargs)
+
+
+def _remote_stage(host, repo_name):
+    """Choose a unique stage under the VM user's TEMP, as build-staged.ps1 requires."""
+    temp = _pwsh(host, '[IO.Path]::GetTempPath()', capture_output=True, text=True, check=True).stdout.strip()
+    if not temp.lower().startswith('c:\\'):
+        raise RuntimeError('VM TEMP must be on C:; refusing a different staging drive')
+    return temp.rstrip('\\') + '\\WindowsAppBuilds\\' + repo_name + '-' + uuid.uuid4().hex[:12]
+
+
+def _upload(host, local_stage, remote_stage):
+    """Stream the prepared local stage into the VM with tar (bsdtar ships with Windows)."""
+    _pwsh(host, f"New-Item -ItemType Directory -Force -Path '{remote_stage}' | Out-Null", check=True)
+    with tempfile.TemporaryFile() as archive:
+        with tarfile.open(fileobj=archive, mode='w') as tar:
+            tar.add(local_stage, arcname='.')
+        archive.seek(0)
+        subprocess.run(['ssh', *SSH_OPTIONS, host, f'tar -xf - -C "{remote_stage}"'],
+                       stdin=archive, check=True)
+
+
+def _download(host, remote_stage, output):
+    """Copy back whichever logs, result and artifacts exist; a failed build has fewer."""
+    candidates = ', '.join(f"'{name}'" for name in (*RETURNED_FILES, 'artifacts'))
+    listing = _pwsh(host, f"Set-Location '{remote_stage}'; @({candidates}) | Where-Object {{ Test-Path $_ }}",
+                    capture_output=True, text=True)
+    names = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    if not names:
+        return
+    with tempfile.TemporaryFile() as archive:
+        subprocess.run(['ssh', *SSH_OPTIONS, host, f'tar -cf - -C "{remote_stage}" ' + ' '.join(names)],
+                       stdout=archive, check=False)
+        archive.seek(0)
+        with tarfile.open(fileobj=archive, mode='r') as tar:
+            tar.extractall(output, filter='data')
+
+
+def _stop_remote_tree(host, remote_stage):
+    """Stop this build's Windows process tree using the PID build-staged.ps1 recorded."""
+    result = _pwsh(host, f"$p = Get-Content -LiteralPath '{remote_stage}\\windows.pid' -ErrorAction Stop; "
+                         "taskkill.exe /PID $p /T /F | Out-Null; exit $LASTEXITCODE",
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return result.returncode == 0
+
+
+def run(args, repo, config, snapshot_source, scripts_dir):
+    """Build in the VM and return the build's exit code.
+
+    args: parsed bridge arguments; repo: resolved WSL checkout; config: validated
+    windows-build.json; snapshot_source: the bridge's source copier; scripts_dir:
+    directory holding build-staged.ps1 and install-staged.ps1.
+    """
+    host = vm_host()
+    if args.install or args.dev or args.skip_build or not (args.build_only or args.no_sign):
+        raise RuntimeError('The windows-dev VM transport supports only --build-only and --no-sign builds; '
+                           'signed builds and installs need the dev signing key in the VM, which is not authorized')
+
+    build_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
+    output = repo / '.artifacts' / 'windows-build' / build_id
+    output.mkdir(parents=True)
+    remote_stage = _remote_stage(host, repo.name)
+    code = 1
+    cleanup_allowed = True
+    process = None
+
+    try:
+        # Phase 1: prepare the same stage layout the local transport uses.
+        with tempfile.TemporaryDirectory(prefix=repo.name + '-vm-') as directory:
+            local_stage = Path(directory)
+            source_directory = config.get('source_directory', '.')
+            snapshot_source(repo / source_directory, local_stage / 'source' / source_directory)
+            for name in ('build-staged.ps1', 'install-staged.ps1'):
+                (local_stage / name).write_bytes((scripts_dir / name).read_bytes())
+            request = dict(config, platform=args.platform, configuration=args.configuration,
+                           build_only=args.build_only, no_sign=args.no_sign, dev=False, install=False,
+                           skip_build=False, dry_run=False, no_launch=False, store_identity_mode=False)
+            # Unsigned builds never open the key, so its password stays on this side.
+            request.pop('certificate_password', None)
+            (local_stage / 'request.json').write_text(json.dumps(request), encoding='ascii')
+            print(f'Staging {repo.name} in {host}:{remote_stage}', flush=True)
+            _upload(host, local_stage, remote_stage)
+
+        # Phase 2: run the shared build script, teeing output into console.log.
+        with (output / 'console.log').open('wb') as console:
+            process = subprocess.Popen(
+                ['ssh', *SSH_OPTIONS, host,
+                 f'pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{remote_stage}\\build-staged.ps1" -Stage "{remote_stage}"'],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for line in process.stdout:
+                console.write(line)
+                sys.stdout.buffer.write(line)
+                sys.stdout.buffer.flush()
+            code = process.wait()
+    except BaseException:
+        # Interrupted: stop only this build's VM process tree before removing inputs.
+        if process is not None and process.poll() is None:
+            process.terminate()
+            cleanup_allowed = _stop_remote_tree(host, remote_stage)
+        raise
+    finally:
+        # Phase 3: return results, then remove the VM stage unless a build may still run.
+        try:
+            _download(host, remote_stage, output)
+        finally:
+            if cleanup_allowed:
+                _pwsh(host, f"Remove-Item -LiteralPath '{remote_stage}' -Recurse -Force", check=False)
+            else:
+                print(f'Build may still be running; VM stage preserved: {remote_stage}', file=sys.stderr)
+            print(f'Results: {output}', flush=True)
+    return code

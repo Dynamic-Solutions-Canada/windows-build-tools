@@ -1,0 +1,39 @@
+# Local Windows 11 build VM for the shared bridge, run under WSL's nested KVM.
+# Start on demand and stop after builds so its RAM returns to WSL:
+#   docker compose -f /development/windows-build-tools/vm/compose.yml up -d
+#   docker compose -f /development/windows-build-tools/vm/compose.yml stop
+# Credentials live outside version control in ~/.secrets/windows-build-tools/windows-dev/.
+name: windows-dev
+services:
+  windows:
+    # Pinned for reproducible installs; check Docker Hub before bumping.
+    image: dockurr/windows:6.06
+    container_name: windows-dev
+    env_file:
+      - ${HOME}/.secrets/windows-build-tools/windows-dev/vm.env
+    environment:
+      VERSION: "11"
+      # WSL shares about 15 GiB with Paseo and its agents. 4G guest under a 5G hard
+      # container cap keeps the machine's 4 GiB safety margin; raise both together
+      # only after WSL's own memory limit is increased.
+      RAM_SIZE: "4G"
+      CPU_CORES: "4"
+      DISK_SIZE: "128G"
+    mem_limit: 5g
+    memswap_limit: 5g
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    # Loopback only: nothing is exposed beyond this machine.
+    ports:
+      - 127.0.0.1:8006:8006
+      - 127.0.0.1:3389:3389/tcp
+      - 127.0.0.1:3389:3389/udp
+      - 127.0.0.1:2229:22
+    volumes:
+      - ${HOME}/.local/share/windows-dev/storage:/storage
+      - ./oem:/oem:ro
+    restart: "no"
+    stop_grace_period: 2m
