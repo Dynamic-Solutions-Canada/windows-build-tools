@@ -11,6 +11,8 @@ import sys
 import tempfile
 import uuid
 
+import host_platform
+
 EXCLUDED_DIRECTORIES = {
     '.git', '.vs', '.crashdiag', 'bin', 'obj', 'node_modules',
     '__pycache__', '.artifacts', 'layout', 'artifacts',
@@ -99,7 +101,9 @@ def parse_arguments():
     """Validate mutually exclusive build and install modes before any mutation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', required=True, type=Path)
-    parser.add_argument('--platform', choices=('ARM64', 'x64'), default='ARM64')
+    # No fixed default: the build host's own architecture is used unless this overrides it.
+    parser.add_argument('--platform', choices=('ARM64', 'x64'), default=None,
+                        help="Target platform; defaults to the Windows build host's architecture")
     parser.add_argument('--configuration', choices=('Debug', 'Release'), default='Release')
     parser.add_argument('--build-only', action='store_true', help='Compile without MSIX packaging')
     parser.add_argument('--no-sign', action='store_true', help='Build an unsigned Store-identity MSIX')
@@ -194,6 +198,9 @@ def main():
     if (not args.skip_build and not args.build_only and not args.no_sign
             and (certificate_source is None or not certificate_source.is_file())):
         raise FileNotFoundError('Existing dev signing certificate missing; create it deliberately before a signed build')
+    if args.platform is None:
+        args.platform = host_platform.local_platform()
+        print(f'Platform: {args.platform} (this Windows host; pass --platform to override)', flush=True)
     # Read the password only here, on the local Windows path: container delegation re-runs this
     # script on the WSL host, which owns ~/.secrets, and the VM transport never signs. Only a
     # fresh signed build opens the key, so compile-only, unsigned and --skip-build runs skip it.

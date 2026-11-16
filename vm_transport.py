@@ -58,6 +58,18 @@ def _pwsh(host, script, **kwargs):
     return _ssh(host, f'pwsh -NoProfile -NonInteractive -Command "{script}"', **kwargs)
 
 
+def _guest_platform(host):
+    """Return the guest's --platform value from its OS architecture.
+
+    OSArchitecture reports the real Windows architecture even when pwsh itself runs
+    emulated, unlike PROCESSOR_ARCHITECTURE, which reports the emulated one.
+    """
+    import host_platform
+    architecture = _pwsh(host, '[Runtime.InteropServices.RuntimeInformation]::OSArchitecture',
+                         capture_output=True, text=True, check=True).stdout
+    return host_platform.platform_for(architecture)
+
+
 def _remote_stage(host, repo_name):
     """Choose a unique stage under the VM user's TEMP, as build-staged.ps1 requires."""
     temp = _pwsh(host, '[IO.Path]::GetTempPath()', capture_output=True, text=True, check=True).stdout.strip()
@@ -112,6 +124,10 @@ def run(args, repo, config, snapshot_source, scripts_dir):
     if args.install or args.dev or args.skip_build or not (args.build_only or args.no_sign):
         raise RuntimeError('The windows-dev VM transport supports only --build-only and --no-sign builds; '
                            'signed builds and installs need the dev signing key in the VM, which is not authorized')
+
+    if args.platform is None:
+        args.platform = _guest_platform(host)
+        print(f'Platform: {args.platform} ({host}; pass --platform to override)', flush=True)
 
     build_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
     output = repo / '.artifacts' / 'windows-build' / build_id

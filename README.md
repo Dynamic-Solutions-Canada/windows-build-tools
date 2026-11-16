@@ -4,7 +4,7 @@ Run these commands from the repository root in Ubuntu WSL:
 
 | Command | Result |
 | --- | --- |
-| `npm run build:desktop` | Signed ARM64 Release dev MSIX |
+| `npm run build:desktop` | Signed Release dev MSIX for the build host's architecture |
 | `npm run verify:desktop` | Full Windows Debug compile, including XAML |
 | `npm run install:desktop` | Build, update in place, then launch |
 | `npm run install:desktop -- --skip-build` | Reinstall the latest successful dev MSIX for the selected platform |
@@ -16,7 +16,12 @@ A library with no MSIX project can use `--build-only` with a `windows-build.json
 that names only `project`; packaging and signing keys are required only by the
 modes that use them.
 
-Pass `-- --platform x64` to build for x64. Packaging defaults to Release;
+The platform defaults to the Windows build host's own architecture: x64 or ARM64.
+Local builds use the WSL distro's architecture, which always matches its Windows
+host, and VM builds ask the guest for its OS architecture. The bridge prints the
+platform it chose. Pass `-- --platform x64` or `-- --platform ARM64` to override it,
+for example to build for another PC; apps should not record which architecture a
+given PC has. Packaging defaults to Release;
 `verify:desktop` uses Debug. Store upload/bundling remains in the existing
 project release workflow. These commands never commit, push, or publish.
 

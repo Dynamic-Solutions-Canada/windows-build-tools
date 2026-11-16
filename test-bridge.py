@@ -13,7 +13,22 @@ import time
 import unittest
 import signal
 
+import host_platform
+
 BRIDGE = Path(__file__).with_name('windows-build.py')
+
+
+class HostPlatformTests(unittest.TestCase):
+    """Map the architecture names uname and .NET report to --platform values."""
+
+    def test_known_architectures(self):
+        for name, expected in (('x86_64', 'x64'), ('AMD64', 'x64'), ('X64', 'x64'),
+                               ('aarch64', 'ARM64'), ('Arm64', 'ARM64'), ('Arm64\r\n', 'ARM64')):
+            self.assertEqual(host_platform.platform_for(name), expected, name)
+
+    def test_unsupported_architecture_asks_for_an_explicit_platform(self):
+        with self.assertRaisesRegex(ValueError, '--platform'):
+            host_platform.platform_for('X86')
 PACKAGE_FIXTURE = '''param([string]$Platform, [string]$Configuration, [switch]$NoSign)
 $ErrorActionPreference = 'Stop'
 # Exercise a non-ASCII UTF-8 script under the Windows packaging runtime.
@@ -107,7 +122,10 @@ class BridgeTests(unittest.TestCase):
             process = subprocess.Popen(['python3', str(BRIDGE), '--repo', str(root)],
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
+                # The bridge may announce its chosen platform first; the stage line follows.
                 line = process.stdout.readline()
+                while line and not line.startswith('Staging '):
+                    line = process.stdout.readline()
                 windows_stage = line.strip().split(' in ', 1)[1]
                 stage = Path(subprocess.check_output(['wslpath', '-u', windows_stage], text=True).strip())
                 # Wait for the packaging child itself rather than a fixed delay: Windows process
@@ -179,6 +197,20 @@ class BridgeTests(unittest.TestCase):
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn('Source symlinks need an explicit staging policy', result.stdout)
+
+    def test_platform_defaults_to_the_build_hosts_architecture(self):
+        """Without --platform, a build targets this Windows host's own architecture (AI-13)."""
+        expected = host_platform.local_platform()
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-platform-') as directory:
+            root = Path(directory)
+            self.make_library_repo(root)
+            result = subprocess.run(['python3', str(BRIDGE), '--repo', str(root), '--build-only',
+                                     '--configuration', 'Debug'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn(f'Platform: {expected} (this Windows host', result.stdout)
+            report = next((root / '.artifacts/windows-build').glob('*/result.json'))
+            self.assertEqual(json.loads(report.read_text(encoding='utf-8-sig'))['platform'], expected)
 
     def test_signed_shared_dev_build_needs_the_private_password_file(self):
         """A signed build stops before any Windows work when the password file is absent (SEC-11)."""
