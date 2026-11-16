@@ -95,7 +95,11 @@ class BridgeTests(unittest.TestCase):
             (root / 'App/App.csproj').write_text('<Project />')
             (root / 'AppMSIX').mkdir()
             (root / 'AppMSIX/App.pfx').write_text('fixture')
-            (root / 'AppMSIX/build-msix.ps1').write_text('param([string]$Platform, [string]$Configuration)\nStart-Sleep -Seconds 60\n')
+            # The script marks that it is running, so the test cancels a live packaging child.
+            (root / 'AppMSIX/build-msix.ps1').write_text(
+                'param([string]$Platform, [string]$Configuration)\n'
+                "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'started') -Value 'running'\n"
+                'Start-Sleep -Seconds 120\n')
             (root / 'windows-build.json').write_text(json.dumps({
                 'project': 'App/App.csproj', 'package_script': 'AppMSIX/build-msix.ps1',
                 'package_output': 'AppMSIX/bin/msix-output', 'certificate': 'AppMSIX/App.pfx',
@@ -106,14 +110,17 @@ class BridgeTests(unittest.TestCase):
                 line = process.stdout.readline()
                 windows_stage = line.strip().split(' in ', 1)[1]
                 stage = Path(subprocess.check_output(['wslpath', '-u', windows_stage], text=True).strip())
-                deadline = time.monotonic() + 10
-                while not (stage / 'windows.pid').exists() and time.monotonic() < deadline:
-                    time.sleep(0.05)
+                # Wait for the packaging child itself rather than a fixed delay: Windows process
+                # startup and the fixture compile can take tens of seconds on a busy machine.
+                started = stage / 'source/AppMSIX/started'
+                deadline = time.monotonic() + 90
+                while not started.exists() and time.monotonic() < deadline and process.poll() is None:
+                    time.sleep(0.1)
                 self.assertTrue((stage / 'windows.pid').exists())
-                # Let the child start, then interrupt the normal WSL invocation.
-                time.sleep(0.5)
+                self.assertTrue(started.exists(), 'packaging child never started')
+                # Interrupt the normal WSL invocation while that child is still sleeping.
                 process.send_signal(signal.SIGINT)
-                output, _ = process.communicate(timeout=15)
+                output, _ = process.communicate(timeout=60)
                 self.assertEqual(process.returncode, 130, output)
                 self.assertFalse(stage.exists(), output)
             finally:
