@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+import shutil
 import signal
 
 import build_lock
@@ -267,6 +268,56 @@ class BridgeTests(unittest.TestCase):
             holder.stdout.close()
             with mock.patch.dict(os.environ, XDG_CACHE_HOME=directory):
                 build_lock.acquire('local', 'next', no_wait=True).close()
+
+    def fake_interop_failure(self, directory, failures):
+        """Put a pwsh.exe first on PATH that fails `failures` times with WSL's interop timeout.
+
+        After that it hands every call to the real pwsh.exe, so the build still runs on
+        Windows. Returns the environment to run the bridge with.
+        """
+        real = shutil.which('pwsh.exe')
+        fake_bin = Path(directory) / 'bin'
+        fake_bin.mkdir()
+        counter = Path(directory) / 'failures-left'
+        counter.write_text(str(failures))
+        fake = fake_bin / 'pwsh.exe'
+        fake.write_text(
+            '#!/usr/bin/env bash\n'
+            f'left=$(cat "{counter}")\n'
+            'if [ "$left" -gt 0 ]; then\n'
+            f'  echo $((left - 1)) > "{counter}"\n'
+            "  echo '<3>WSL (1) ERROR: UtilAcceptVsock:281: accept4 failed 110' >&2\n"
+            '  exit 1\n'
+            'fi\n'
+            f'exec "{real}" "$@"\n')
+        fake.chmod(0o755)
+        return dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}')
+
+    def test_first_interop_timeout_is_retried_once(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-interop-') as directory:
+            root = Path(directory) / 'repo'
+            root.mkdir()
+            self.make_library_repo(root)
+            env = self.fake_interop_failure(directory, failures=1)
+            result = subprocess.run(['python3', str(BRIDGE), '--repo', str(root), '--build-only',
+                                     '--configuration', 'Debug'],
+                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('retrying once', result.stdout)
+
+    def test_a_second_interop_timeout_fails_with_its_error(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-interop-') as directory:
+            root = Path(directory) / 'repo'
+            root.mkdir()
+            self.make_library_repo(root)
+            env = self.fake_interop_failure(directory, failures=2)
+            result = subprocess.run(['python3', str(BRIDGE), '--repo', str(root), '--build-only',
+                                     '--configuration', 'Debug'],
+                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stdout.count('retrying once'), 1, result.stdout)
+            self.assertIn('accept4 failed 110', result.stdout)
+            self.assertFalse((root / '.artifacts').exists(), result.stdout)
 
     def test_signed_shared_dev_build_needs_the_private_password_file(self):
         """A signed build stops before any Windows work when the password file is absent (SEC-11)."""

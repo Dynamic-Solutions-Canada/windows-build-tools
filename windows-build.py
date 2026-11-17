@@ -159,6 +159,31 @@ def delegate_container():
     return subprocess.call(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, command])
 
 
+INTEROP_TIMEOUT_MARKERS = ('UtilAcceptVsock', 'accept4 failed 110')
+
+
+def windows_temp_path(powershell):
+    """Return the Windows user's TEMP path, from the run's first pwsh.exe interop call.
+
+    The first interop call after a quiet spell sometimes times out inside WSL with
+    "UtilAcceptVsock ... accept4 failed 110" while later calls succeed, so exactly
+    that failure is retried once and the retry is reported. Any other failure, or a
+    second timeout, raises CalledProcessError with Windows' own error output.
+    """
+    command = [powershell, '-NoProfile', '-NonInteractive', '-Command', '[System.IO.Path]::GetTempPath()']
+    for attempt in (1, 2):
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        timed_out = all(marker in result.stderr for marker in INTEROP_TIMEOUT_MARKERS)
+        if attempt == 1 and timed_out:
+            print('Windows interop timed out on the first call (UtilAcceptVsock accept4 110); retrying once',
+                  flush=True)
+            continue
+        sys.stderr.write(result.stderr)
+        raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
+
+
 def latest_dev_package(repo, platform, store_identity=False):
     """Find the newest successful dev artifact for this platform, excluding failures."""
     candidates = sorted((repo / '.artifacts/windows-build').glob('*/result.json'), reverse=True)
@@ -214,9 +239,7 @@ def main():
     # exits; validation above runs first so a bad request fails without queueing.
     held_lock = build_lock.acquire('local', repo, no_wait=args.no_wait)  # noqa: F841 (kept open until exit)
 
-    temp_windows = subprocess.check_output([
-        powershell, '-NoProfile', '-NonInteractive', '-Command', '[System.IO.Path]::GetTempPath()'
-    ], text=True).strip()
+    temp_windows = windows_temp_path(powershell)
     temp_linux = Path(subprocess.check_output(['wslpath', '-u', temp_windows], text=True).strip())
     if not temp_windows.lower().startswith('c:\\'):
         raise RuntimeError('Windows TEMP must be on C:; refusing a different staging drive')
