@@ -170,7 +170,7 @@ function Add-AppxPackage {
         output = self.run_pwsh('\n'.join(guest + offers) + f"""
 & '{self.windows(self.APP_TEST_DIR / 'install-package.ps1')}' -Deps '{self.windows(deps)}' -Record '{self.windows(record)}'
 """)
-        recorded = [line.split('_')[0] for line in record.read_text().split()] if record.exists() else []
+        recorded = record.read_text().splitlines() if record.exists() else []
         return output, recorded
 
     def test_a_newer_guest_framework_keeps_back_the_whole_older_runtime(self):
@@ -189,9 +189,41 @@ function Add-AppxPackage {
             output, recorded = self.install_runtime(
                 directory, ['MicrosoftCorporationII.WinAppRuntime.Singleton_8000.994.0.0_x64__8wekyb3d8bbwe'])
             self.assertIn('kept installed 8000.994.0.0: MicrosoftCorporationII.WinAppRuntime.Singleton', output)
-            self.assertEqual(sorted(recorded), sorted([
-                'Microsoft.WindowsAppRuntime.1.8', 'Microsoft.WinAppRuntime.DDLM.8000.770.0.0-x6',
-                'MicrosoftCorporationII.WinAppRuntime.Main.1.8']))
+            self.assertEqual(sorted(recorded), sorted(
+                f'{name}_8000.770.0.0_x64__8wekyb3d8bbwe preexisting=no' for name in (
+                    'Microsoft.WindowsAppRuntime.1.8', 'Microsoft.WinAppRuntime.DDLM.8000.770.0.0-x6',
+                    'MicrosoftCorporationII.WinAppRuntime.Main.1.8')))
+
+    def test_an_update_over_the_guests_own_package_is_recorded_as_preexisting(self):
+        with tempfile.TemporaryDirectory(prefix='install-package-') as directory:
+            _, recorded = self.install_runtime(
+                directory, ['MicrosoftCorporationII.WinAppRuntime.Main.1.8_8000.600.0.0_x64__8wekyb3d8bbwe'])
+            self.assertIn('MicrosoftCorporationII.WinAppRuntime.Main.1.8_8000.770.0.0_x64__8wekyb3d8bbwe '
+                          'preexisting=yes', recorded)
+
+    def remove_with_guest(self, directory, record_lines, guest_packages):
+        """Run remove-packages.ps1 over record_lines with guest_packages installed; return (output, left)."""
+        record = Path(directory) / 'installed.txt'
+        record.write_text('\n'.join(record_lines) + '\n')
+        guest = '\n'.join(f"New-Fake '{full}'" for full in guest_packages)
+        output = self.run_pwsh(guest + f"""
+& '{self.windows(self.APP_TEST_DIR / 'remove-packages.ps1')}' -Record '{self.windows(record)}'
+'left: ' + (($global:Fake | ForEach-Object PackageFullName) -join ' ')
+""")
+        return output, output.split('left: ', 1)[1].split()
+
+    def test_the_guests_own_newer_version_is_kept_unless_the_family_was_ours(self):
+        """Old records (no preexisting field) and preexisting=yes remove only the exact recorded version."""
+        main = 'MicrosoftCorporationII.WinAppRuntime.Main.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
+        for record_line in (main.format(770), f'{main.format(770)} preexisting=yes'):
+            with self.subTest(record=record_line), tempfile.TemporaryDirectory(prefix='remove-packages-') as directory:
+                output, left = self.remove_with_guest(directory, [record_line], [main.format(994)])
+                self.assertIn('kept MicrosoftCorporationII.WinAppRuntime.Main.1.8 8000.994.0.0: not ours', output)
+                self.assertEqual(left, [main.format(994)])
+        with tempfile.TemporaryDirectory(prefix='remove-packages-') as directory:
+            output, left = self.remove_with_guest(directory, [main.format(770)], [main.format(770)])
+            self.assertIn(f'removed: {main.format(770)}', output)
+            self.assertEqual(left, [])
 
     def test_updated_packages_are_removed_and_frameworks_in_use_are_kept(self):
         framework = 'Microsoft.WindowsAppRuntime.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
@@ -201,7 +233,8 @@ function Add-AppxPackage {
         with tempfile.TemporaryDirectory(prefix='remove-packages-') as directory:
             # The test recorded the 770 runtime and the app; the Store then updated the runtime to 994.
             record = Path(directory) / 'installed.txt'
-            record.write_text('\n'.join([framework.format(770), main.format(770), app]) + '\n')
+            record.write_text('\n'.join(f'{name} preexisting=no' for name in (
+                framework.format(770), main.format(770), app)) + '\n')
             output = self.run_pwsh(f"""
 New-Fake '{framework.format(994)}'
 New-Fake '{x86_framework}'

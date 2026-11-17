@@ -10,7 +10,8 @@ First installs every package in C:\apptest\deps (the Windows App Runtime MSIX fi
 app_test_put_runtime copies there; Microsoft-signed, framework first), then takes the signer
 certificate from the app package's own signature (nothing private enters the guest), adds it to
 LocalMachine\TrustedPeople and installs or updates the app. Every package it adds is appended to
-C:\apptest\installed.txt, so remove-packages.ps1 can undo exactly that.
+C:\apptest\installed.txt with "preexisting=yes|no" (whether the guest already had that package
+family at another version), so remove-packages.ps1 can undo exactly that and nothing of the guest's.
 
 A runtime package is skipped, and not recorded, when the guest already has the same package at
 that version or higher: Add-AppxPackage refuses a downgrade with 0x80073D06, and the Store often
@@ -35,13 +36,26 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+<#
+Family and architecture of a package full name (Name_Version_Architecture_ResourceId_PublisherId), as
+"Name_PublisherId_Architecture": what stays the same when a package is updated in place.
+#>
+function Get-FamilyKey([string]$FullName) {
+    $parts = $FullName.Split('_')
+    "$($parts[0])_$($parts[4])_$($parts[2])"
+}
+
 <# Install one package unless that exact version is already there, and record what was added. #>
 function Install-One([string]$Path) {
     $before = @(Get-AppxPackage | ForEach-Object PackageFullName)
     Add-AppxPackage -Path $Path -ForceApplicationShutdown
     $added = Get-AppxPackage | Where-Object { $before -notcontains $_.PackageFullName }
     foreach ($p in $added) {
-        Add-Content $Record $p.PackageFullName
+        # Whether the guest already had this family and architecture at another version. If not, the
+        # whole family is ours, and cleanup may remove it even after the Store updates it in place.
+        $key = Get-FamilyKey $p.PackageFullName
+        $preexisting = if (@($before | Where-Object { (Get-FamilyKey $_) -eq $key })) { 'yes' } else { 'no' }
+        Add-Content $Record "$($p.PackageFullName) preexisting=$preexisting"
         Write-Output "installed: $($p.PackageFullName)"
     }
     if (-not $added) { Write-Output "already installed: $(Split-Path $Path -Leaf)" }

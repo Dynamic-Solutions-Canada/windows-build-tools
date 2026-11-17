@@ -10,9 +10,12 @@ records the new version, so removal takes the app away entirely rather than rest
 version; that suits these disposable test guests. Run it in the desktop session (app_test_run), like the
 install. Safe to run after a failed install: it removes whatever was recorded.
 
-Each recorded package is matched by its family and architecture, not its exact version: the Store can
-update a package in place during a session (App Installer updating the Windows App Runtime, for
-example), and the newer version is still the one this test added. A package that another installed
+Each recorded package is matched by its family and architecture. The installed version is removed
+when it is the recorded version, or when the record says the family was new to the guest
+("preexisting=no"): then a newer version is still ours, updated in place by the Store during the
+session (App Installer updating the Windows App Runtime, for example). Otherwise it belongs to the
+guest and is kept, reported as "kept <name> <version>: not ours". Records written before the
+preexisting field existed are treated the same way, removing only the exact recorded version. A package that another installed
 package still depends on is kept and reported as "kept ..., in use by ...", since removing it would
 break that package (App Installer needs the runtime framework it updated).
 
@@ -59,19 +62,29 @@ function Remove-TrustedCertificate([string]$Thumbprint) {
     Write-Output "untrusted: $Thumbprint"
 }
 
-<# Remove whatever version of a recorded package is installed now, unless something depends on it. #>
+<#
+Remove the installed version of a recorded package when it is ours, unless something depends on it.
+An entry is "<full name> preexisting=yes|no"; older entries are just the full name.
+#>
 function Remove-RecordedPackage([string]$Entry) {
-    $identity = Get-RecordedIdentity $Entry
+    $fields = $Entry.Split(' ')
+    $recorded = $fields[0]
+    $familyWasNew = $fields -contains 'preexisting=no'
+    $identity = Get-RecordedIdentity $recorded
     if (-not $identity) {
         Write-Output "could not read record entry: $Entry"
         return
     }
     $installed = @(Find-InstalledVersions $identity)
     if (-not $installed) {
-        Write-Output "already gone: $Entry"
+        Write-Output "already gone: $recorded"
         return
     }
     foreach ($package in $installed) {
+        if ($package.PackageFullName -ne $recorded -and -not $familyWasNew) {
+            Write-Output "kept $($package.Name) $($package.Version): not ours"
+            continue
+        }
         $dependents = @(Find-Dependents $package.PackageFullName)
         if ($dependents) {
             Write-Output "kept $($package.PackageFullName), in use by $($dependents -join ', ')"
