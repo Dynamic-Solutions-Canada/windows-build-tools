@@ -52,6 +52,48 @@ Set-Content -LiteralPath (Join-Path $output 'fixture.msix') -Value 'fixture only
 '''
 
 
+class AppTestLockTests(unittest.TestCase):
+    """app_test_lock in vm/app-test/app-test.sh shares the VM build lock across shells."""
+
+    APP_TEST = BRIDGE.parent / 'vm/app-test/app-test.sh'
+
+    def app_test(self, cache, command):
+        """Run one app-test helper in its own bash, as an agent's separate tool call would."""
+        return subprocess.run(['bash', '-c', f'source "{self.APP_TEST}"; {command}'],
+                              env=dict(os.environ, XDG_CACHE_HOME=cache, APP_TEST_LOCK_MINUTES='2'),
+                              capture_output=True, text=True, timeout=60)
+
+    def assert_vm_lock_held(self, cache, held):
+        with mock.patch.dict(os.environ, XDG_CACHE_HOME=cache):
+            try:
+                build_lock.acquire('vm-windows-dev', 'probe', no_wait=True).close()
+                is_held = False
+            except build_lock.BuildLockBusy:
+                is_held = True
+        self.assertEqual(is_held, held)
+
+    def test_lock_outlives_its_shell_and_unlocks_from_another(self):
+        with tempfile.TemporaryDirectory(prefix='app-test-lock-') as cache:
+            locked = self.app_test(cache, 'app_test_lock')
+            try:
+                self.assertEqual(locked.returncode, 0, locked.stderr)
+                self.assertIn('holding the vm-windows-dev build lock', locked.stdout)
+                self.assert_vm_lock_held(cache, True)
+            finally:
+                unlocked = self.app_test(cache, 'app_test_unlock')
+            self.assertIn('released', unlocked.stdout)
+            self.assert_vm_lock_held(cache, False)
+
+    def test_unlock_never_touches_a_real_builds_lock(self):
+        with tempfile.TemporaryDirectory(prefix='app-test-lock-') as cache:
+            with mock.patch.dict(os.environ, XDG_CACHE_HOME=cache):
+                held = build_lock.acquire('vm-windows-dev', '/development/some-app')
+            with held:
+                result = self.app_test(cache, 'app_test_unlock')
+                self.assertIn('no app-test holder', result.stdout)
+                self.assert_vm_lock_held(cache, True)
+
+
 class BridgeTests(unittest.TestCase):
     """Check the OS boundary and cleanup policy with lightweight Windows fixtures."""
 

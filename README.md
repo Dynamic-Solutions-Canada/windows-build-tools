@@ -137,6 +137,28 @@ docker compose -f vm/compose.win10.yml stop
 
 The guest gets 3 GB under a 3.5 GB container cap, so check `free -m` first and leave the usual safety margin. Never run it alongside `windows-dev` or the Android VM. The first start downloads Windows 10 from Microsoft and installs it unattended, which takes a while; later starts boot the existing disk. Windows is installed unactivated, which is enough for testing.
 
+## Exercising and capturing an app in a test VM
+
+`vm/app-test/` installs a dev-signed package in `windows10-test` or `windows-dev` and drives and screenshots it there, so UI checks (light, dark, high contrast, narrow widths) never use the Windows host's own desktop. Install in a guest whose Windows meets the app's `MinVersion`: the Windows 10 VM refuses Windows 11-only packages with 0x80073CFD.
+
+| File | Runs | Does |
+|---|---|---|
+| `app-test.sh` | Host, sourced | `app_test_use win10\|win11`, `app_test_lock` and `app_test_unlock` for `windows-dev`, then `app_test_put`, `app_test_ps` (over SSH), `app_test_ui` (in the desktop session), `app_test_get` and `app_test_screendump` (whole screen through the QEMU monitor, no session needed) |
+| `install-package.ps1` | Guest, over SSH | Trusts the signer's public certificate taken from the package's own signature, then installs or updates it; `-Untrust` removes that certificate |
+| `run-interactive.ps1` | Guest, over SSH | Runs a script in the signed-in desktop session through a one-off interactive scheduled task, waits, prints its transcript and removes the task |
+| `ui-lib.ps1` | Guest, dot-sourced by a UI script | UI Automation lookups, clicks, combo box choices, window resizing, region screenshots into `C:\apptest\out`, and high contrast on or off for the session (not persisted) |
+
+```bash
+source vm/app-test/app-test.sh
+app_test_use win11
+for f in vm/app-test/*.ps1 drive.ps1 App-1.2.3.4-x64.msix; do app_test_put "$f"; done
+app_test_ps 'C:\apptest\install-package.ps1' -Msix 'C:\apptest\App-1.2.3.4-x64.msix'
+app_test_ui 'C:\apptest\drive.ps1'
+app_test_get 'out/*.png' ./shots/
+```
+
+Both guests sign in automatically, which `run-interactive.ps1` needs: SSH sessions run outside the desktop, so UI Automation, screenshots and theme changes made over SSH do not reach the screen. Add-AppxPackage over SSH fails with "Access is denied ... reading the console output buffer" unless progress output is off, which `install-package.ps1` does. On `windows-dev`, the shared build VM, hold its build lock for the whole session (`app_test_lock`, then `app_test_unlock`), and afterwards uninstall the test packages and run `install-package.ps1 -Untrust` (also after a failed install, since the certificate is trusted first), so builds never run against a half-configured guest. The lock outlives the shell that took it: it is held until `app_test_unlock`, from any shell, or until `APP_TEST_LOCK_MINUTES` (default 60) pass, and the lock note shows when it expires. `windows10-test` is disposable and keeps the certificate. Narrator and other assistive technology cannot be judged this way; check them by hand.
+
 ## Shared development signing
 
 The six app manifests (Hub Display Switch, ImmichDrive, Little Launcher, Persistent,
