@@ -1,0 +1,45 @@
+# Local Windows 10 22H2 test VM, run under WSL's nested KVM. For installing and exercising apps
+# whose minimum is Windows 10 22H2 (build 19045), not for building: builds use compose.yml.
+# Start on demand and stop afterwards so its RAM returns to WSL (from the repo root):
+#   docker compose -f vm/compose.win10.yml up -d
+#   docker compose -f vm/compose.win10.yml stop
+# Never run it alongside the Windows 11 build VM or the Android VM.
+# Shares the build VM's guest password and SSH key list (outside version control).
+name: windows10-test
+services:
+  windows:
+    # Same pinned image as the build VM; check Docker Hub before bumping.
+    image: dockurr/windows:6.06
+    container_name: windows10-test
+    env_file:
+      - ${HOME}/.secrets/windows-build-tools/windows-dev/vm.env
+    environment:
+      # Windows 10 Pro 22H2 (build 19045), the family's minimum (D-018).
+      VERSION: "10"
+      # Smaller than the build VM: it only runs the app under test. A 3G guest under a 3.5G hard
+      # cap keeps WSL's 2.5 GiB safety margin when about 6 GiB is free; check `free -m` first.
+      RAM_SIZE: "3G"
+      # The image's own RAM check measures free memory inside the container, where file cache from
+      # the ISO download counts as used; after the first download it shrank the guest to 54 MB and
+      # refused to boot. The hard container cap below is the real limit, so skip the guess.
+      RAM_CHECK: "N"
+      CPU_CORES: "4"
+      DISK_SIZE: "64G"
+    mem_limit: 3584m
+    memswap_limit: 3584m
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    # Loopback only, on ports beside the build VM's so both configurations can exist.
+    ports:
+      - 127.0.0.1:8007:8006
+      - 127.0.0.1:3390:3389/tcp
+      - 127.0.0.1:3390:3389/udp
+      - 127.0.0.1:2230:22
+    volumes:
+      - ${HOME}/.local/share/windows10-test/storage:/storage
+      - ./oem:/oem:ro
+    restart: "no"
+    stop_grace_period: 2m

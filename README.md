@@ -113,6 +113,17 @@ docker compose -f /development/windows-build-tools/vm/compose.yml stop
 
 When `pwsh.exe` is not on the WSL path and the `windows-dev` container is running (or `WINDOWS_BUILD_VM` names an SSH destination explicitly), `vm_transport.py` snapshots the source here, streams it into the guest user's `%TEMP%\WindowsAppBuilds`, runs the same `build-staged.ps1`, copies logs and artifacts back to `.artifacts/windows-build/<build-id>/`, then removes the guest stage. The guest toolchain (PowerShell 7, the .NET SDK band from `global.json`, Visual Studio Build Tools with the C++ workload, ARM64 tools and the Windows SDK) is installed by the re-runnable `vm/guest-toolchain.ps1`; see its header for the two commands. It supports `--build-only` and `--no-sign` only: signed builds and installs would need the private dev signing key inside the guest, which is not authorized. The guest is a 4 GiB VM under a 5 GiB hard container cap, sized for WSL's shared memory; raise both together only after WSL's own limit is increased.
 
+## Windows 10 22H2 test VM
+
+`vm/compose.win10.yml` runs a Windows 10 Pro 22H2 guest (build 19045, the family's minimum, D-018) for installing and exercising apps there before a release (TEST-9). It is a test machine, not a build host: build on the host or the Windows 11 VM, then install the package in this one. It uses the same pinned image, guest password and SSH key list as `windows-dev`, with its own disk in `~/.local/share/windows10-test/storage` and loopback ports beside the build VM's: web console `http://127.0.0.1:8007`, RDP `127.0.0.1:3390` and SSH `127.0.0.1:2230`.
+
+```bash
+docker compose -f vm/compose.win10.yml up -d
+docker compose -f vm/compose.win10.yml stop
+```
+
+The guest gets 3 GB under a 3.5 GB container cap, so check `free -m` first and leave the usual safety margin. Never run it alongside `windows-dev` or the Android VM. The first start downloads Windows 10 from Microsoft and installs it unattended, which takes a while; later starts boot the existing disk. Windows is installed unactivated, which is enough for testing.
+
 ## Shared development signing
 
 The six app manifests (Hub Display Switch, ImmichDrive, Little Launcher, Persistent,
