@@ -15,7 +15,10 @@ C:\apptest\installed.txt, so remove-packages.ps1 can undo exactly that.
 A runtime package is skipped, and not recorded, when the guest already has the same package at
 that version or higher: Add-AppxPackage refuses a downgrade with 0x80073D06, and the Store often
 updates the guest's runtime past the version in the NuGet cache. Cleanup then leaves the guest's own
-runtime alone. Progress output is off,
+runtime alone. The deps folder holds one runtime release (framework, Main, Singleton, DDLM), whose
+packages are version-matched to its framework; when the guest's framework is newer, the rest of the
+older release is skipped too, rather than installed beside it (the DDLM's name embeds its version,
+so it never matches a newer one by name). Progress output is off,
 because Add-AppxPackage fails with "Access is denied ... reading the console output buffer" when
 it cannot draw its progress bar.
 
@@ -58,7 +61,10 @@ function Get-PackageIdentity([string]$Path) {
     $manifest.Package.Identity
 }
 
-<# Install a runtime package unless the guest already has it at this version or higher. #>
+<#
+Install a runtime package unless the guest already has it at this version or higher. Returns $true
+when it was kept back because the guest's copy is newer or the same.
+#>
 function Install-Dependency([string]$Path) {
     $identity = Get-PackageIdentity $Path
     $newer = Get-AppxPackage -PackageTypeFilter Main, Framework |
@@ -70,17 +76,25 @@ function Install-Dependency([string]$Path) {
         Sort-Object { [version]$_.Version } -Descending |
         Select-Object -First 1
     if ($newer) {
-        Write-Output "kept installed $($newer.Version): $($identity.Name) (offered $($identity.Version))"
-        return
+        Write-Host "kept installed $($newer.Version): $($identity.Name) (offered $($identity.Version))"
+        return $true
     }
-    Install-One $Path
+    Install-One $Path | Write-Host
+    return $false
 }
 
 # ── Dependencies (the runtime framework before the packages that need it) ──
 $depFiles = Get-ChildItem (Join-Path $Deps '*.msix') -ErrorAction SilentlyContinue |
     Sort-Object { if ($_.Name -match '^Microsoft\.WindowsAppRuntime\.\d') { 0 } else { 1 } }, Name
+$frameworkKept = $false
 foreach ($dep in $depFiles) {
-    Install-Dependency $dep.FullName
+    if ($frameworkKept) {
+        Write-Host "skipped $($dep.Name): the guest's runtime framework is newer than this release"
+        continue
+    }
+    $kept = Install-Dependency $dep.FullName
+    # The framework sorts first; if the guest's is newer, the rest of this release would mismatch it.
+    if ($kept -and $dep.Name -match '^Microsoft\.WindowsAppRuntime\.\d') { $frameworkKept = $true }
 }
 if (-not $Msix) { return }
 

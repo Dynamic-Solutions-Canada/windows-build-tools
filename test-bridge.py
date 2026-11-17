@@ -150,26 +150,48 @@ function Add-AppxPackage {
                 f'<Identity Name="{name}" Publisher="{self.PUBLISHER}" Version="{version}" '
                 'ProcessorArchitecture="x64" /></Package>'))
 
-    def test_runtime_already_newer_in_the_guest_is_kept_and_not_recorded(self):
-        framework = 'Microsoft.WindowsAppRuntime.1.8'
-        main = 'MicrosoftCorporationII.WinAppRuntime.Main.1.8'
-        with tempfile.TemporaryDirectory(prefix='install-package-') as directory:
-            deps = Path(directory) / 'deps'
-            deps.mkdir()
-            record = Path(directory) / 'installed.txt'
-            # The NuGet cache offers 770; the Store already updated the guest's framework to 994.
-            self.write_msix(deps / 'Microsoft.WindowsAppRuntime.1.8.msix', framework, '8000.770.0.0')
-            self.write_msix(deps / 'Main.x64.msix', main, '8000.770.0.0')
-            main_full = f'{main}_8000.770.0.0_x64__8wekyb3d8bbwe'
-            output = self.run_pwsh(f"""
-New-Fake '{framework}_8000.994.0.0_x64__8wekyb3d8bbwe'
-$global:Offers['Main.x64.msix'] = '{main_full}'
-$global:Offers['Microsoft.WindowsAppRuntime.1.8.msix'] = '{framework}_8000.770.0.0_x64__8wekyb3d8bbwe'
+    RUNTIME = {  # file in the NuGet cache: package name, as in Windows App Runtime 1.8
+        'Microsoft.WindowsAppRuntime.1.8.msix': 'Microsoft.WindowsAppRuntime.1.8',
+        'Microsoft.WindowsAppRuntime.DDLM.1.8.msix': 'Microsoft.WinAppRuntime.DDLM.8000.770.0.0-x6',
+        'Microsoft.WindowsAppRuntime.Main.1.8.msix': 'MicrosoftCorporationII.WinAppRuntime.Main.1.8',
+        'Microsoft.WindowsAppRuntime.Singleton.1.8.msix': 'MicrosoftCorporationII.WinAppRuntime.Singleton',
+    }
+
+    def install_runtime(self, directory, guest_packages):
+        """Offer the 770 runtime to a guest holding guest_packages; return (output, recorded names)."""
+        deps = Path(directory) / 'deps'
+        deps.mkdir()
+        record = Path(directory) / 'installed.txt'
+        offers = []
+        for file, name in self.RUNTIME.items():
+            self.write_msix(deps / file, name, '8000.770.0.0')
+            offers.append(f"$global:Offers['{file}'] = '{name}_8000.770.0.0_x64__8wekyb3d8bbwe'")
+        guest = [f"New-Fake '{full}'" for full in guest_packages]
+        output = self.run_pwsh('\n'.join(guest + offers) + f"""
 & '{self.windows(self.APP_TEST_DIR / 'install-package.ps1')}' -Deps '{self.windows(deps)}' -Record '{self.windows(record)}'
 """)
-            self.assertIn(f'kept installed 8000.994.0.0: {framework} (offered 8000.770.0.0)', output)
-            self.assertIn(f'installed: {main_full}', output)
-            self.assertEqual(record.read_text().split(), [main_full])
+        recorded = [line.split('_')[0] for line in record.read_text().split()] if record.exists() else []
+        return output, recorded
+
+    def test_a_newer_guest_framework_keeps_back_the_whole_older_runtime(self):
+        """Store-updated guests: nothing from the older release is installed or recorded."""
+        with tempfile.TemporaryDirectory(prefix='install-package-') as directory:
+            output, recorded = self.install_runtime(
+                directory, ['Microsoft.WindowsAppRuntime.1.8_8000.994.0.0_x64__8wekyb3d8bbwe'])
+            self.assertIn('kept installed 8000.994.0.0: Microsoft.WindowsAppRuntime.1.8 (offered 8000.770.0.0)', output)
+            for file in ('DDLM', 'Main', 'Singleton'):
+                self.assertIn(f'skipped Microsoft.WindowsAppRuntime.{file}.1.8.msix', output)
+            self.assertEqual(recorded, [])
+
+    def test_runtime_packages_are_kept_individually_when_newer(self):
+        """Without a newer framework, each package is still skipped only if the guest's copy is newer."""
+        with tempfile.TemporaryDirectory(prefix='install-package-') as directory:
+            output, recorded = self.install_runtime(
+                directory, ['MicrosoftCorporationII.WinAppRuntime.Singleton_8000.994.0.0_x64__8wekyb3d8bbwe'])
+            self.assertIn('kept installed 8000.994.0.0: MicrosoftCorporationII.WinAppRuntime.Singleton', output)
+            self.assertEqual(sorted(recorded), sorted([
+                'Microsoft.WindowsAppRuntime.1.8', 'Microsoft.WinAppRuntime.DDLM.8000.770.0.0-x6',
+                'MicrosoftCorporationII.WinAppRuntime.Main.1.8']))
 
     def test_updated_packages_are_removed_and_frameworks_in_use_are_kept(self):
         framework = 'Microsoft.WindowsAppRuntime.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
