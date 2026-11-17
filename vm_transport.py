@@ -125,6 +125,10 @@ def run(args, repo, config, snapshot_source, scripts_dir):
         raise RuntimeError('The windows-dev VM transport supports only --build-only and --no-sign builds; '
                            'signed builds and installs need the dev signing key in the VM, which is not authorized')
 
+    # Queue behind other runs on this VM only; local Windows builds use their own lock.
+    import build_lock
+    held_lock = build_lock.acquire(f'vm-{host}', repo, no_wait=args.no_wait)  # noqa: F841 (kept open until return)
+
     if args.platform is None:
         args.platform = _guest_platform(host)
         print(f'Platform: {args.platform} ({host}; pass --platform to override)', flush=True)

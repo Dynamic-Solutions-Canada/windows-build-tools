@@ -11,6 +11,7 @@ import sys
 import tempfile
 import uuid
 
+import build_lock
 import host_platform
 
 EXCLUDED_DIRECTORIES = {
@@ -113,6 +114,8 @@ def parse_arguments():
     parser.add_argument('--skip-build', action='store_true', help='Install the most recent successful dev package')
     parser.add_argument('--dry-run', action='store_true', help='Validate installation without changing Windows')
     parser.add_argument('--no-launch', action='store_true', help='Install without starting the app')
+    parser.add_argument('--no-wait', action='store_true',
+                        help='Fail at once instead of queueing behind another run on the same Windows host')
     args = parser.parse_args()
     if args.skip_build and not args.install:
         parser.error('--skip-build requires --install')
@@ -206,6 +209,10 @@ def main():
     # fresh signed build opens the key, so compile-only, unsigned and --skip-build runs skip it.
     if config.get('signing') == 'shared-dev' and not (args.build_only or args.no_sign or args.skip_build):
         config['certificate_password'] = read_shared_dev_password()
+
+    # One build at a time per Windows host, across all sessions. Held until this process
+    # exits; validation above runs first so a bad request fails without queueing.
+    held_lock = build_lock.acquire('local', repo, no_wait=args.no_wait)  # noqa: F841 (kept open until exit)
 
     temp_windows = subprocess.check_output([
         powershell, '-NoProfile', '-NonInteractive', '-Command', '[System.IO.Path]::GetTempPath()'

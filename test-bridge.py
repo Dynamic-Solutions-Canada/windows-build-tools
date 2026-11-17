@@ -11,8 +11,10 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 import signal
 
+import build_lock
 import host_platform
 
 BRIDGE = Path(__file__).with_name('windows-build.py')
@@ -211,6 +213,60 @@ class BridgeTests(unittest.TestCase):
             self.assertIn(f'Platform: {expected} (this Windows host', result.stdout)
             report = next((root / '.artifacts/windows-build').glob('*/result.json'))
             self.assertEqual(json.loads(report.read_text(encoding='utf-8-sig'))['platform'], expected)
+
+    def run_library_build(self, root, cache, *extra):
+        """Start a compile-only library build that uses a private lock directory."""
+        return subprocess.Popen(['python3', str(BRIDGE), '--repo', str(root), '--build-only',
+                                 '--configuration', 'Debug', *extra],
+                                env=dict(os.environ, XDG_CACHE_HOME=str(cache)),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def test_no_wait_fails_fast_while_another_run_holds_the_host(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-lock-') as directory:
+            root, cache = Path(directory) / 'repo', Path(directory) / 'cache'
+            root.mkdir()
+            self.make_library_repo(root)
+            with mock.patch.dict(os.environ, XDG_CACHE_HOME=str(cache)):
+                held = build_lock.acquire('local', 'other-repo')
+            with held:
+                process = self.run_library_build(root, cache, '--no-wait')
+                output, _ = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 1, output)
+            self.assertIn(f'pid {os.getpid()}, repo other-repo', output)
+            self.assertFalse((root / '.artifacts').exists(), output)
+
+    def test_a_second_run_waits_for_the_host_then_builds(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-lock-') as directory:
+            root, cache = Path(directory) / 'repo', Path(directory) / 'cache'
+            root.mkdir()
+            self.make_library_repo(root)
+            with mock.patch.dict(os.environ, XDG_CACHE_HOME=str(cache)):
+                held = build_lock.acquire('local', 'other-repo')
+            process = self.run_library_build(root, cache)
+            try:
+                line = process.stdout.readline()
+                while line and not line.startswith('Waiting for another windows-build run'):
+                    line = process.stdout.readline()
+                self.assertIn('repo other-repo', line)
+                self.assertFalse((root / '.artifacts').exists(), 'built while the host was locked')
+            finally:
+                held.close()
+            output, _ = process.communicate(timeout=120)
+            self.assertEqual(process.returncode, 0, output)
+
+    def test_a_killed_holder_never_leaves_a_stale_lock(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-lock-') as directory:
+            env = dict(os.environ, XDG_CACHE_HOME=directory)
+            holder = subprocess.Popen(
+                ['python3', '-c', 'import build_lock, sys, time; build_lock.acquire("local", "held"); '
+                                  'print("held", flush=True); time.sleep(120)'],
+                cwd=str(BRIDGE.parent), env=env, stdout=subprocess.PIPE, text=True)
+            self.assertEqual(holder.stdout.readline().strip(), 'held')
+            holder.kill()
+            holder.wait()
+            holder.stdout.close()
+            with mock.patch.dict(os.environ, XDG_CACHE_HOME=directory):
+                build_lock.acquire('local', 'next', no_wait=True).close()
 
     def test_signed_shared_dev_build_needs_the_private_password_file(self):
         """A signed build stops before any Windows work when the password file is absent (SEC-11)."""

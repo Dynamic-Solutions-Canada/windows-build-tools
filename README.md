@@ -52,6 +52,19 @@ temporary source copy. Tracked release versions stay unchanged. A per-app Window
 mutex serializes dev builds and installs. Store packaging keeps the tracked
 release version and revision zero.
 
+### One build at a time per Windows host
+
+Every run takes an exclusive lock for its Windows host before doing any Windows work,
+so builds from different sessions and repositories queue instead of overlapping.
+Overlapping runs have failed with `UtilAcceptVsock ... accept4 failed 110` from
+`pwsh.exe`. A queued run prints `Waiting for another windows-build run on local
+(pid N, repo X)` and starts by itself when the lock is free. Pass `--no-wait`
+(`npm run verify:desktop -- --no-wait`) to fail at once instead. The local host and
+each VM have separate locks under `~/.cache/windows-build-tools/`. The lock is
+released when the run exits for any reason, including a crash or `kill -9`, so
+there is never a stale lock to delete. Do not write `pgrep` wait loops around these
+commands; just run them, and they will queue.
+
 Installation uses `Add-AppxPackage -ForceApplicationShutdown`, verifies the
 installed version, and launches its manifest entry point. It never uninstalls,
 forces a downgrade or removes another publisher's package. A Store copy signed by
