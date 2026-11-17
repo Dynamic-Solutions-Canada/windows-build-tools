@@ -22,7 +22,9 @@ New-Item -ItemType Directory -Force C:\apptest\out | Out-Null
 
 # The task's own command line: run the script with a transcript, so its output can be printed here.
 $command = "Start-Transcript -Path '$log' | Out-Null; try { & '$Script' } catch { Write-Output ('ERROR: ' + `$_) }; Stop-Transcript | Out-Null"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$command`""
+# Through a headless console host: Windows 11 hands a plain console program to Windows Terminal,
+# which ignores -WindowStyle Hidden and leaves a terminal button on the taskbar of every capture.
+$action = New-ScheduledTaskAction -Execute "conhost.exe" -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$command`""
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive
 Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
 

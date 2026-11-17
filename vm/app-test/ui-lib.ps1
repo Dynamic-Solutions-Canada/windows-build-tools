@@ -16,6 +16,10 @@ public static class UiNative {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern int GetDpiForWindow(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attribute, out RECT r, int size);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   public struct HIGHCONTRAST { public int cbSize; public int dwFlags; public string lpszDefaultScheme; }
@@ -135,4 +139,124 @@ function Set-WindowActive($Window, [int]$Attempts = 5) {
         }
     }
     throw "Could not make '$($Window.Current.Name)' the foreground window after $Attempts attempts"
+}
+
+<#
+The window's visible frame in physical screen pixels (DWMWA_EXTENDED_FRAME_BOUNDS): what the user
+sees as the window, without its shadow or the invisible resize borders that GetWindowRect includes.
+Returns an object with X, Y, Width and Height.
+#>
+function Get-WindowFrame($Window) {
+    $rect = New-Object UiNative+RECT
+    $result = [UiNative]::DwmGetWindowAttribute([IntPtr]$Window.Current.NativeWindowHandle, 9, [ref]$rect, 16)
+    if ($result -ne 0) { throw "DwmGetWindowAttribute failed: 0x{0:X8}" -f $result }
+    [pscustomobject]@{ X = $rect.Left; Y = $rect.Top; Width = $rect.Right - $rect.Left; Height = $rect.Bottom - $rect.Top }
+}
+
+<#
+Centre a window's visible frame in the work area (the screen minus the taskbar), optionally resizing
+its frame to $Width x $Height first (physical pixels). Store screenshot crops are taken around the
+window and kept inside the work area, so a centred window keeps wallpaper on every side.
+#>
+function Set-WindowCentered($Window, [int]$Width = 0, [int]$Height = 0) {
+    $handle = [IntPtr]$Window.Current.NativeWindowHandle
+    $outer = New-Object UiNative+RECT
+    [UiNative]::GetWindowRect($handle, [ref]$outer) | Out-Null
+    $frame = Get-WindowFrame $Window
+
+    # MoveWindow positions the outer rectangle, which is wider than the frame by the invisible borders.
+    $left = $frame.X - $outer.Left
+    $top = $frame.Y - $outer.Top
+    $right = $outer.Right - ($frame.X + $frame.Width)
+    $bottom = $outer.Bottom - ($frame.Y + $frame.Height)
+    if ($Width -le 0) { $Width = $frame.Width }
+    if ($Height -le 0) { $Height = $frame.Height }
+
+    $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $x = $work.X + [int](($work.Width - $Width) / 2)
+    $y = $work.Y + [int](($work.Height - $Height) / 2)
+    Set-WindowBounds $Window ($x - $left) ($y - $top) ($Width + $left + $right) ($Height + $top + $bottom)
+}
+
+<#
+Save a whole-screen capture of $Window's desktop as C:\apptest\out\<Name>.png, 1:1, with a
+<Name>.json sidecar describing it, for Store screenshots that are cropped later on the host (the
+winui-app-kit render script reads the sidecar). Makes the window active first, so its title bar and
+Mica are drawn as the user sees them.
+
+Sidecar fields: screen (the PNG's own size), scale (the window's display scale, percent), window (the
+visible frame, Get-WindowFrame), workArea, theme (apps and system, "dark" or "light"), wallpaper
+(file name), effects (DWM effects forced on by app_test_effects), os ("10.0.<build>") and capturedUtc.
+Sizes are physical pixels.
+#>
+function Save-DesktopCapture([string]$Name, $Window) {
+    Set-WindowActive $Window
+    Start-Sleep -Milliseconds 500
+
+    # Capture first, so the metadata describes the pixels as close in time as possible.
+    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+    $bmp = New-Object System.Drawing.Bitmap $screen.Bounds.Width, $screen.Bounds.Height
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
+    $captured = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $bmp.Save("$UiOut\$Name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+    $size = @{ width = $bmp.Width; height = $bmp.Height }
+    $g.Dispose(); $bmp.Dispose()
+
+    # Theme, wallpaper, effects and build as they are now.
+    $personalize = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    $themeName = { param($light) if ($light -eq 0) { 'dark' } else { 'light' } }
+    $dwm = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\Dwm' -ErrorAction SilentlyContinue
+    $version = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $frame = Get-WindowFrame $Window
+    $work = $screen.WorkingArea
+
+    $sidecar = [ordered]@{
+        screen = $size
+        scale = [int]([UiNative]::GetDpiForWindow([IntPtr]$Window.Current.NativeWindowHandle) * 100 / 96)
+        window = [ordered]@{ x = $frame.X; y = $frame.Y; width = $frame.Width; height = $frame.Height }
+        workArea = [ordered]@{ x = $work.X; y = $work.Y; width = $work.Width; height = $work.Height }
+        theme = [ordered]@{ apps = (& $themeName $personalize.AppsUseLightTheme); system = (& $themeName $personalize.SystemUsesLightTheme) }
+        wallpaper = Split-Path -Leaf (Get-ItemProperty 'HKCU:\Control Panel\Desktop').WallPaper
+        effects = ($dwm -and $dwm.ForceEffectMode -eq 2)
+        os = "$($version.CurrentMajorVersionNumber).$($version.CurrentMinorVersionNumber).$($version.CurrentBuild)"
+        capturedUtc = $captured
+    }
+    # UTF-8 without a byte order mark, which Set-Content in Windows PowerShell 5.1 would add.
+    [IO.File]::WriteAllText("$UiOut\$Name.json", ($sidecar | ConvertTo-Json -Depth 3), (New-Object Text.UTF8Encoding $false))
+    Write-Output "capture: $Name.png, $Name.json"
+}
+
+<#
+Find an app's notification-area (tray) icon by the start of its tooltip, such as "Little Launcher:",
+and return it as a UI Automation element (click it with Invoke-Click), or $null. Matches only tray
+icons (AutomationId NotifyItemIcon): a search for a Button named after the app finds its taskbar
+button first. Looks in the visible tray, then opens "Show Hidden Icons" and looks in the overflow,
+which stays open when the icon is found there and is closed again when it is not.
+Whether Windows 11 exposes a tray icon's menu items to UI Automation is under investigation: look
+for them from $UiRoot, since the menu is a top-level #32768 popup, not part of the app's window.
+#>
+function Find-TrayIcon([string]$TooltipPrefix) {
+    $isIcon = New-Object System.Windows.Automation.PropertyCondition($UiA::AutomationIdProperty, 'NotifyItemIcon')
+    $taskbar = $UiRoot.FindFirst('Children', (New-Object System.Windows.Automation.PropertyCondition($UiA::ClassNameProperty, 'Shell_TrayWnd')))
+    $icon = $taskbar.FindAll('Descendants', $isIcon) | Where-Object { $_.Current.Name -like "$TooltipPrefix*" } | Select-Object -First 1
+    if ($icon) { return $icon }
+
+    # Not in the visible tray: open the overflow flyout and look there.
+    $chevron = $taskbar.FindAll('Descendants', (New-Object System.Windows.Automation.PropertyCondition($UiA::AutomationIdProperty, 'SystemTrayIcon'))) |
+        Where-Object { $_.Current.ClassName -eq 'SystemTray.NormalButton' } | Select-Object -First 1
+    if (-not $chevron) { return $null }
+    Invoke-Click $chevron
+    Start-Sleep -Seconds 1
+    $overflow = $UiRoot.FindFirst('Children', (New-Object System.Windows.Automation.PropertyCondition($UiA::ClassNameProperty, 'TopLevelWindowForOverflowXamlIsland')))
+    $icon = $null
+    if ($overflow) {
+        $icon = $overflow.FindAll('Descendants', $isIcon) | Where-Object { $_.Current.Name -like "$TooltipPrefix*" } | Select-Object -First 1
+    }
+    if (-not $icon) {
+        # Close the flyout again, so it is not left over a later screenshot.
+        Invoke-Click $chevron
+        Start-Sleep -Seconds 1
+    }
+    $icon
 }

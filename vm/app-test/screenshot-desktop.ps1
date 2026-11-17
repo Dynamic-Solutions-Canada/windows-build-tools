@@ -6,8 +6,9 @@ Prepare a test guest's desktop for screenshots, and put it back afterwards.
 -Mode Prepare saves the current settings to C:\apptest\desktop, then sets the screenshot desktop:
 the wallpaper (Windows 11's dark bloom, img19.jpg, by default), desktop icons hidden, the taskbar
 search box and Widgets off, every pin that Windows lets a script remove taken off the taskbar, dark
-mode for Windows and apps, and transparency effects on. Running it again keeps the settings saved the first time,
-so a second Prepare never makes the screenshot desktop the one Restore returns to.
+mode for Windows and apps, transparency effects on, and the screen at 1920 x 1080 (not persisted, so
+a guest restart also returns it to its usual size). Running it again keeps the settings saved the
+first time, so a second Prepare never makes the screenshot desktop the one Restore returns to.
 
 -Mode Restore puts every saved setting back, including the taskbar pins, and deletes the saved copy.
 It also works from a later session or after a failed capture, since everything it needs is in the
@@ -26,11 +27,16 @@ whether that is set but does not change it, because it needs a restart.
 .PARAMETER Mode Prepare or Restore.
 .PARAMETER Wallpaper File name in C:\Windows\Web\Wallpaper\Windows. Windows 10 has no img19.jpg;
 pass img0.jpg there.
+.PARAMETER Width Screen width to switch to for the session, in pixels (Store screenshots need at
+least 1366 x 768; the guest starts at 1280 x 800).
+.PARAMETER Height Screen height to switch to.
 .PARAMETER State Folder for the saved settings; tests point it elsewhere.
 #>
 param(
     [Parameter(Mandatory)] [ValidateSet('Prepare', 'Restore')] [string]$Mode,
     [string]$Wallpaper = 'img19.jpg',
+    [int]$Width = 1920,
+    [int]$Height = 1080,
     [string]$State = 'C:\apptest\desktop'
 )
 $ErrorActionPreference = 'Stop'
@@ -48,6 +54,23 @@ public static class DesktopNative {
   public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string windowName);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr wParam, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DEVMODE {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+    public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public int dmFields;
+    public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+    public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+    public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+    public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+  }
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplaySettings(string device, int mode, ref DEVMODE dm);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+  public static DEVMODE Current() {
+    var dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+    if (!EnumDisplaySettings(null, -1, ref dm)) throw new InvalidOperationException("EnumDisplaySettings failed");
+    return dm;
+  }
 }
 "@
 
@@ -157,6 +180,28 @@ function Set-DesktopIcons([bool]$Visible) {
     }
 }
 
+<# The primary screen's current size, as "<width>x<height>". #>
+function Get-DisplaySize {
+    $mode = [DesktopNative]::Current()
+    "$($mode.dmPelsWidth)x$($mode.dmPelsHeight)"
+}
+
+<#
+Switch the primary screen to $Size ("<width>x<height>") for this session. Not persisted
+(ChangeDisplaySettings flags 0), so a guest restart returns to the usual size.
+#>
+function Set-DisplaySize([string]$Size) {
+    if ((Get-DisplaySize) -eq $Size) { return }
+    $width, $height = $Size.Split('x')
+    $mode = [DesktopNative]::Current()
+    $mode.dmPelsWidth = [int]$width
+    $mode.dmPelsHeight = [int]$height
+    $mode.dmFields = 0x80000 -bor 0x100000   # DM_PELSWIDTH, DM_PELSHEIGHT
+    $result = [DesktopNative]::ChangeDisplaySettings([ref]$mode, 0)
+    if ($result -ne 0) { throw "Could not switch the screen to $Size (ChangeDisplaySettings returned $result)" }
+    Start-Sleep -Seconds 3
+}
+
 <# Unpin every app whose shell item offers "Unpin from taskbar", and return their names. #>
 function Remove-TaskbarPins {
     $apps = (New-Object -ComObject Shell.Application).NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}').Items()
@@ -191,6 +236,7 @@ function Save-DesktopState {
     $saved = @{
         Wallpaper = Get-RegistryValue 'HKCU:\Control Panel\Desktop' 'WallPaper'
         DesktopIcons = Test-DesktopIcons
+        DisplaySize = Get-DisplaySize
         Values = @($Settings | ForEach-Object { @{ Key = $_.Key; Name = $_.Name; Value = Get-RegistryValue $_.Key $_.Name } })
     }
     # The pin list lives in the Taskband key and the pinned shortcuts folder; keep both.
@@ -212,12 +258,13 @@ function Invoke-Prepare {
         Set-RegistryValue $setting.Key $setting.Name $setting.Value
     }
     $unpinned = @(Remove-TaskbarPins)
+    Set-DisplaySize "$($Width)x$($Height)"
     Restart-Explorer
     Set-DesktopIcons $false
     Set-Wallpaper $wallpaperPath
     Send-ThemeChange
 
-    Write-Output "prepared: wallpaper $Wallpaper, dark mode for Windows and apps, transparency on, desktop icons, search box and Widgets hidden"
+    Write-Output "prepared: wallpaper $Wallpaper, dark mode for Windows and apps, transparency on, screen $(Get-DisplaySize), desktop icons, search box and Widgets hidden"
     if ($unpinned) { Write-Output "unpinned: $($unpinned -join ', ')" }
     Write-EffectsStatus
 }
@@ -241,6 +288,7 @@ function Invoke-Restore {
         New-Item -ItemType Directory -Force $PinnedFolder | Out-Null
         Copy-Item "$pins\*" $PinnedFolder -Force
     }
+    if ($saved.DisplaySize) { Set-DisplaySize $saved.DisplaySize }
     Restart-Explorer
     Set-DesktopIcons ([bool]$saved.DesktopIcons)
     if ($saved.Wallpaper) { Set-Wallpaper $saved.Wallpaper }
