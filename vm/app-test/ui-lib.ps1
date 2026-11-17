@@ -10,6 +10,12 @@ public static class UiNative {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int processId);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   public struct HIGHCONTRAST { public int cbSize; public int dwFlags; public string lpszDefaultScheme; }
@@ -98,4 +104,35 @@ function Set-WindowFitted($Window, [int]$Width = 1100) {
 function Set-WindowBounds($Window, [int]$X, [int]$Y, [int]$Width, [int]$Height) {
     [UiNative]::MoveWindow([IntPtr]$Window.Current.NativeWindowHandle, $X, $Y, $Width, $Height, $true) | Out-Null
     Start-Sleep -Seconds 2
+}
+
+<#
+Make a window the active, foreground window, and throw if Windows will not allow it. Captures of an
+inactive window show a dimmed title bar and no Mica, so a drive script calls this before each shot.
+
+Plain SetForegroundWindow has worked in the test guests, even from a background process, since
+nobody types there. Windows can still refuse it (it lets a process take the foreground only when it
+received the last input event), so every attempt is checked with GetForegroundWindow, and retries
+first tap F24, a key no app uses, which should make this process that recipient. That fallback has
+not been seen to run. Not Alt, the usual trick: Alt shows access-key badges in the captured app.
+#>
+function Set-WindowActive($Window, [int]$Attempts = 5) {
+    $handle = [IntPtr]$Window.Current.NativeWindowHandle
+    if ([UiNative]::IsIconic($handle)) {
+        [UiNative]::ShowWindow($handle, 9) | Out-Null   # SW_RESTORE
+    }
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        if ($attempt -gt 1) {
+            [UiNative]::AllowSetForegroundWindow(-1) | Out-Null   # ASFW_ANY
+            [UiNative]::keybd_event(0x87, 0, 0, [UIntPtr]::Zero)  # F24 down
+            [UiNative]::keybd_event(0x87, 0, 2, [UIntPtr]::Zero)  # F24 up (KEYEVENTF_KEYUP)
+        }
+        [UiNative]::BringWindowToTop($handle) | Out-Null
+        [UiNative]::SetForegroundWindow($handle) | Out-Null
+        Start-Sleep -Milliseconds 500
+        if ([UiNative]::GetForegroundWindow() -eq $handle) {
+            return
+        }
+    }
+    throw "Could not make '$($Window.Current.Name)' the foreground window after $Attempts attempts"
 }

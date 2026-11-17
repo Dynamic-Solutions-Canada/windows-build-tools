@@ -36,19 +36,10 @@ guest_build() {
     return 0
 }
 
-# Wait until the guest answers over SSH again, up to $1 minutes.
-wait_for_guest() {
-    local deadline=$(( $(date +%s) + $1 * 60 ))
-    until [[ -n "$(guest_build)" ]]; do
-        (( $(date +%s) < deadline )) || { echo "win10-update: the guest did not come back within $1 minutes" >&2; return 1; }
-        sleep 20
-    done
-}
-
 # Phase 1: confirm the guest is up and still needs the update.
 [[ "$(docker inspect -f '{{.State.Running}}' "$APP_TEST_CONTAINER" 2>/dev/null)" == true ]] ||
     { echo "win10-update: start it first: docker compose -f vm/compose.win10.yml up -d" >&2; exit 1; }
-wait_for_guest 15
+app_test_wait 15
 before=$(guest_build)
 if (( ${before#*.} >= TARGET_UBR )) && [[ "${before%%.*}" == "$TARGET_BUILD" ]]; then
     echo "win10-update: already at $before; nothing to do"
@@ -68,13 +59,14 @@ echo "$MSU_SHA1  $MSU" | sha1sum -c --quiet - || { echo "win10-update: $MSU does
 # .msu to the running system ("Error: 50 The request is not supported"), so unpack it and add its
 # servicing stack update first, then the cumulative update. DISM exits 3010 for "restart required",
 # which reaches us as 194: SSH passes on only the low 8 bits of an exit code (3010 is 0xBC2).
-app_test_put "$MSU" kb5066791.msu
-app_test_ssh 'if exist C:\apptest\kb5066791 rmdir /s /q C:\apptest\kb5066791' || true
-app_test_ssh 'mkdir C:\apptest\kb5066791 && expand -F:*.cab C:\apptest\kb5066791.msu C:\apptest\kb5066791 >nul'
+# Its own folder, not C:\apptest: that belongs to whichever app-test run claims it.
+app_test_ssh 'if exist C:\win10-update rmdir /s /q C:\win10-update' || true
+app_test_ssh 'mkdir C:\win10-update\kb5066791' && _app_test_copy "$MSU" C:/win10-update/kb5066791.msu
+app_test_ssh 'expand -F:*.cab C:\win10-update\kb5066791.msu C:\win10-update\kb5066791 >nul'
 for cab in SSU-19041.6449-x64.cab Windows10.0-KB5066791-x64.cab; do
     echo "win10-update: adding $cab"
     set +e
-    app_test_ssh "dism /Online /Add-Package /PackagePath:C:\\apptest\\kb5066791\\$cab /Quiet /NoRestart"
+    app_test_ssh "dism /Online /Add-Package /PackagePath:C:\\win10-update\\kb5066791\\$cab /Quiet /NoRestart"
     code=$?
     set -e
     if (( code != 0 && code != 3010 && code != 194 )); then
@@ -84,10 +76,8 @@ for cab in SSU-19041.6449-x64.cab Windows10.0-KB5066791-x64.cab; do
 done
 
 # Phase 4: restart to finish servicing, then report the build the guest reached.
-app_test_ssh 'shutdown /r /t 5 /c "win10-update"' || true
-sleep 60
-wait_for_guest 90
-app_test_ssh 'del C:\apptest\kb5066791.msu & rmdir /s /q C:\apptest\kb5066791' || true
+app_test_restart 90
+app_test_ssh 'rmdir /s /q C:\win10-update' || true
 after=$(guest_build)
 echo "win10-update: guest is now at $after (was $before)"
 # Servicing can need a second restart; a lower revision here means it has not finished yet.

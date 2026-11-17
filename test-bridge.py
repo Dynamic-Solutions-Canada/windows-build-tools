@@ -95,6 +95,62 @@ class AppTestLockTests(unittest.TestCase):
                 self.assert_vm_lock_held(cache, True)
 
 
+class AppTestClaimTests(unittest.TestCase):
+    """app_test_put claims C:\\apptest for one run and refuses another run's folder."""
+
+    APP_TEST = BRIDGE.parent / 'vm/app-test/app-test.sh'
+
+    # Stand-ins for the guest: the owner query answers with $FAKE_STATE (as cmd would, with CRLF),
+    # the install record query with one entry, and every SSH command and copy is logged.
+    STUBS = r'''
+APP_TEST_CONTAINER=windows-dev
+APP_TEST_OWNER=alpha
+app_test_ssh() {
+    echo "ssh $*" >> "$LOG"
+    case "$*" in
+        *'(type C:\apptest\owner.txt)'*) printf '%s\r\n' "$FAKE_STATE" ;;
+        *installed.txt*) printf 'Some.App_1.0.0.0_x64__abc preexisting=no\r\n' ;;
+    esac
+}
+_app_test_copy() { echo "copy $*" >> "$LOG"; }
+'''
+
+    def put(self, state):
+        """Run app_test_put against a guest whose C:\\apptest is in `state`; return the result and log."""
+        with tempfile.TemporaryDirectory(prefix='app-test-claim-') as scratch:
+            log = Path(scratch) / 'log'
+            log.touch()
+            result = subprocess.run(['bash', '-c', f'source "{self.APP_TEST}"; {self.STUBS}\napp_test_put /etc/hostname'],
+                                    env=dict(os.environ, LOG=str(log), FAKE_STATE=state),
+                                    capture_output=True, text=True, timeout=30)
+            return result, log.read_text()
+
+    def test_claims_a_missing_folder(self):
+        result, log = self.put('?absent')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(log, r'mkdir C:\\apptest && echo alpha, claimed \d{4}-\d\d-\d\d \d+:\d\d [ap]\.m\. E[SD]T>C:\\apptest\\owner.txt')
+        self.assertIn('copy /etc/hostname C:/apptest/hostname', log)
+
+    def test_uses_its_own_folder(self):
+        result, log = self.put('alpha, claimed 2026-11-17 3:05 p.m. EST')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('mkdir', log)
+        self.assertIn('copy /etc/hostname', log)
+
+    def test_refuses_another_runs_folder_and_names_it(self):
+        result, log = self.put('beta, claimed 2026-11-17 3:05 p.m. EST')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('belongs to another run: beta, claimed 2026-11-17 3:05 p.m. EST (this run is alpha)', result.stderr)
+        self.assertNotIn('copy', log)
+
+    def test_refuses_an_unowned_folder_and_shows_its_install_record(self):
+        result, log = self.put('?unowned')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('has no owner record', result.stderr)
+        self.assertIn('Some.App_1.0.0.0_x64__abc preexisting=no', result.stderr)
+        self.assertNotIn('copy', log)
+
+
 class AppTestPackageTests(unittest.TestCase):
     """install-package.ps1 and remove-packages.ps1 against fake package cmdlets, in the host's pwsh.exe.
 
