@@ -94,6 +94,64 @@ class AppTestLockTests(unittest.TestCase):
                 self.assert_vm_lock_held(cache, True)
 
 
+class RemovePackagesTests(unittest.TestCase):
+    """remove-packages.ps1 against fake package cmdlets, run in the host's pwsh.exe (no real packages)."""
+
+    SCRIPT = BRIDGE.parent / 'vm/app-test/remove-packages.ps1'
+    FAKES = r"""
+$global:Fake = [System.Collections.ArrayList]@()
+function New-Fake($Full, $Deps = @()) {
+    $parts = $Full.Split('_')
+    $global:Fake.Add([pscustomobject]@{
+        PackageFullName = $Full; Name = $parts[0]; Architecture = $parts[2]
+        PackageFamilyName = "$($parts[0])_$($parts[4])"
+        Dependencies = @($Deps | ForEach-Object { [pscustomobject]@{ PackageFullName = $_ } })
+    }) | Out-Null
+}
+function Get-AppxPackage { param($PackageTypeFilter) $global:Fake.ToArray() }
+function Remove-AppxPackage {
+    [CmdletBinding()] param([Parameter(Position = 0)] $Package)
+    $global:Fake.Remove(($global:Fake | Where-Object PackageFullName -eq $Package | Select-Object -First 1))
+}
+"""
+
+    def test_updated_packages_are_removed_and_frameworks_in_use_are_kept(self):
+        if shutil.which('pwsh.exe') is None:
+            self.skipTest('needs the Windows host pwsh.exe')
+        framework = 'Microsoft.WindowsAppRuntime.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
+        main = 'MicrosoftCorporationII.WinAppRuntime.Main.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
+        app = 'Example.TestApp_1.0.0.9_x64__abcdefghijklm'
+        x86_framework = 'Microsoft.WindowsAppRuntime.1.8_8000.770.0.0_x86__8wekyb3d8bbwe'
+        with tempfile.TemporaryDirectory(prefix='remove-packages-') as directory:
+            # The test recorded the 770 runtime and the app; the Store then updated the runtime to 994.
+            record = Path(directory) / 'installed.txt'
+            record.write_text('\n'.join([framework.format(770), main.format(770), app]) + '\n')
+            windows = lambda path: subprocess.check_output(['wslpath', '-w', str(path)], text=True).strip()
+            script = self.FAKES + f"""
+New-Fake '{framework.format(994)}'
+New-Fake '{x86_framework}'
+New-Fake '{main.format(994)}' @('{framework.format(994)}')
+New-Fake '{app}' @('{framework.format(994)}')
+New-Fake 'Microsoft.DesktopAppInstaller_1.27.0.0_x64__8wekyb3d8bbwe' @('{framework.format(994)}')
+& '{windows(self.SCRIPT)}' -Record '{windows(record)}'
+'left: ' + (($global:Fake | ForEach-Object PackageFullName) -join ' ')
+"""
+            # Bypass applies to this process only: scripts on the WSL share count as remote and unsigned.
+            result = subprocess.run(['pwsh.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                                     '-Command', script],
+                                    capture_output=True, text=True, timeout=120)
+            output = result.stdout.replace('\r', '')
+            self.assertEqual(result.returncode, 0, output + result.stderr)
+            self.assertIn(f'removed: {app}', output)
+            self.assertIn(f'removed: {main.format(994)}', output)
+            self.assertIn(f'kept {framework.format(994)}, in use by Microsoft.DesktopAppInstaller', output)
+            left = output.split('left: ', 1)[1]
+            self.assertIn(framework.format(994), left)
+            self.assertIn(x86_framework, left)
+            self.assertNotIn(main.format(994), left)
+            self.assertFalse(record.exists())
+
+
 class BridgeTests(unittest.TestCase):
     """Check the OS boundary and cleanup policy with lightweight Windows fixtures."""
 
