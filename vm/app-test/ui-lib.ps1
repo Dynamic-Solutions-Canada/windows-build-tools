@@ -84,6 +84,16 @@ function Select-ComboOption($Combo, [string]$Match) {
     Start-Sleep -Seconds 2
 }
 
+<#
+Place a window at the top left of the work area, at most $Width wide and as tall as the work area.
+Test VMs have small screens (windows-dev is 1280 x 800): a window that runs under the taskbar hides
+its lower navigation items, and clicks meant for them land on the taskbar.
+#>
+function Set-WindowFitted($Window, [int]$Width = 1100) {
+    $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    Set-WindowBounds $Window ($work.X + 10) ($work.Y + 10) ([Math]::Min($Width, $work.Width - 20)) ($work.Height - 20)
+}
+
 <# Move and resize a window (physical pixels). #>
 function Set-WindowBounds($Window, [int]$X, [int]$Y, [int]$Width, [int]$Height) {
     [UiNative]::MoveWindow([IntPtr]$Window.Current.NativeWindowHandle, $X, $Y, $Width, $Height, $true) | Out-Null

@@ -3,7 +3,9 @@
 # capturing it, without touching the Windows host's own desktop. Source this file, then:
 #   app_test_use win10        # or: app_test_use win11 (the build VM; app_test_lock first, app_test_unlock after)
 #   app_test_put local.ps1    # copy into C:\apptest\ in the guest
-#   app_test_ps C:\\apptest\\install-package.ps1 -Msix C:\\apptest\\App.msix   # over SSH
+#   app_test_put_runtime               # Windows App Runtime MSIX files from the NuGet cache, if the guest lacks them
+#   app_test_run "& C:\\apptest\\install-package.ps1 -Msix C:\\apptest\\App.msix"   # one line in the desktop session
+#   app_test_ps C:\\apptest\\script.ps1 -Arg value   # over SSH (no desktop, no package installs on Windows 11)
 #   app_test_ui C:\\apptest\\drive.ps1     # run in the signed-in desktop session (no arguments)
 #   app_test_get out/name.png ./shots/     # copy back from C:\apptest\
 #   app_test_screendump ./shots/full.png   # whole guest screen through the QEMU monitor
@@ -28,6 +30,48 @@ app_test_ps()  { local script="$1"; shift; app_test_ssh "powershell -NoProfile -
 # The UI script takes no arguments (quoting through SSH, cmd and a scheduled task is fragile):
 # write any inputs into the script or a file beside it.
 app_test_ui()  { app_test_ps 'C:\apptest\run-interactive.ps1' -Script "$1"; }
+
+# Run one PowerShell line in the desktop session, by writing it into a throwaway script. Needed for
+# installs and removals: Windows 11 refuses Add-AppxPackage over SSH ("Access is denied").
+app_test_run() {
+    local tmp
+    tmp=$(mktemp --suffix=.ps1)
+    printf '%s\n' "$1" > "$tmp"
+    app_test_put "$tmp" run-line.ps1 && app_test_ui 'C:\apptest\run-line.ps1'
+    rm -f "$tmp"
+}
+
+# Copy the Windows App Runtime packages (framework, main, singleton, DDLM) from the NuGet cache into
+# C:\apptest\deps, where install-package.ps1 installs them first. A clean guest has no runtime, and
+# apps then fail with 0x80073CF3 "depends on a framework that could not be found".
+#   $1: runtime package version (as in ~/.nuget/packages/microsoft.windowsappsdk.runtime/); defaults
+#       to the newest there.
+#   $2: x64 or arm64; defaults to the guest's own Windows architecture.
+app_test_put_runtime() {
+    local root="${NUGET_PACKAGES:-$HOME/.nuget/packages}/microsoft.windowsappsdk.runtime" version arch msix
+    version="${1:-$(ls "$root" 2>/dev/null | sort -V | tail -1)}"
+    arch="${2:-$(_app_test_guest_arch)}" || return 1
+    [[ -n "$version" && -d "$root/$version/tools/MSIX/win10-$arch" ]] || { echo "app_test_put_runtime: no runtime MSIX under $root/$version/tools/MSIX/win10-$arch" >&2; return 1; }
+    app_test_ssh 'if not exist C:\apptest\deps mkdir C:\apptest\deps' || return 1
+    for msix in "$root/$version/tools/MSIX/win10-$arch"/*.msix; do
+        app_test_put "$msix" "deps/$(basename "$msix")" || return 1
+    done
+    echo "app-test: copied Windows App Runtime $version ($arch)"
+}
+
+# Print the guest's Windows architecture as a NuGet runtime folder suffix (x64 or arm64). Reads the
+# machine-wide PROCESSOR_ARCHITECTURE from the registry, which names the real OS architecture even
+# when the reading shell runs emulated (the per-process variable would not).
+_app_test_guest_arch() {
+    local value
+    value=$(app_test_ssh 'reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PROCESSOR_ARCHITECTURE' |
+            tr -d '\r' | awk '/PROCESSOR_ARCHITECTURE/ { print $3 }')
+    case "$value" in
+        AMD64) echo x64 ;;
+        ARM64) echo arm64 ;;
+        *) echo "app_test_put_runtime: unsupported guest architecture '$value'; pass x64 or arm64" >&2; return 1 ;;
+    esac
+}
 
 # Hold windows-dev's build lock (the same one vm_transport.py takes), so no build runs against a guest
 # that is half-configured for testing. Waits while a build holds it. The holder runs in its own
