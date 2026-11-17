@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import zipfile
 from unittest import mock
 import shutil
 import signal
@@ -94,17 +95,21 @@ class AppTestLockTests(unittest.TestCase):
                 self.assert_vm_lock_held(cache, True)
 
 
-class RemovePackagesTests(unittest.TestCase):
-    """remove-packages.ps1 against fake package cmdlets, run in the host's pwsh.exe (no real packages)."""
+class AppTestPackageTests(unittest.TestCase):
+    """install-package.ps1 and remove-packages.ps1 against fake package cmdlets, in the host's pwsh.exe.
 
-    SCRIPT = BRIDGE.parent / 'vm/app-test/remove-packages.ps1'
+    Functions take precedence over cmdlets, so no real package is installed or removed.
+    """
+
+    APP_TEST_DIR = BRIDGE.parent / 'vm/app-test'
+    PUBLISHER = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
     FAKES = r"""
 $global:Fake = [System.Collections.ArrayList]@()
 function New-Fake($Full, $Deps = @()) {
     $parts = $Full.Split('_')
     $global:Fake.Add([pscustomobject]@{
-        PackageFullName = $Full; Name = $parts[0]; Architecture = $parts[2]
-        PackageFamilyName = "$($parts[0])_$($parts[4])"
+        PackageFullName = $Full; Name = $parts[0]; Version = $parts[1]; Architecture = $parts[2]
+        PackageFamilyName = "$($parts[0])_$($parts[4])"; Publisher = $global:Publisher
         Dependencies = @($Deps | ForEach-Object { [pscustomobject]@{ PackageFullName = $_ } })
     }) | Out-Null
 }
@@ -113,11 +118,60 @@ function Remove-AppxPackage {
     [CmdletBinding()] param([Parameter(Position = 0)] $Package)
     $global:Fake.Remove(($global:Fake | Where-Object PackageFullName -eq $Package | Select-Object -First 1))
 }
+$global:Offers = @{}
+function Add-AppxPackage {
+    [CmdletBinding()] param($Path, [switch]$ForceApplicationShutdown)
+    New-Fake $global:Offers[(Split-Path $Path -Leaf)]
+}
 """
 
-    def test_updated_packages_are_removed_and_frameworks_in_use_are_kept(self):
+    @staticmethod
+    def windows(path):
+        return subprocess.check_output(['wslpath', '-w', str(path)], text=True).strip()
+
+    def run_pwsh(self, script):
+        """Run fakes plus script in pwsh.exe and return its stdout; fail the test on a nonzero exit."""
         if shutil.which('pwsh.exe') is None:
             self.skipTest('needs the Windows host pwsh.exe')
+        # Bypass applies to this process only: scripts on the WSL share count as remote and unsigned.
+        result = subprocess.run(['pwsh.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                                 '-Command', f"$global:Publisher = '{self.PUBLISHER}'\n" + self.FAKES + script],
+                                capture_output=True, text=True, timeout=120)
+        output = result.stdout.replace('\r', '')
+        self.assertEqual(result.returncode, 0, output + result.stderr)
+        return output
+
+    def write_msix(self, path, name, version):
+        """A stand-in package: just the manifest identity install-package.ps1 reads."""
+        with zipfile.ZipFile(path, 'w') as archive:
+            archive.writestr('AppxManifest.xml', (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">'
+                f'<Identity Name="{name}" Publisher="{self.PUBLISHER}" Version="{version}" '
+                'ProcessorArchitecture="x64" /></Package>'))
+
+    def test_runtime_already_newer_in_the_guest_is_kept_and_not_recorded(self):
+        framework = 'Microsoft.WindowsAppRuntime.1.8'
+        main = 'MicrosoftCorporationII.WinAppRuntime.Main.1.8'
+        with tempfile.TemporaryDirectory(prefix='install-package-') as directory:
+            deps = Path(directory) / 'deps'
+            deps.mkdir()
+            record = Path(directory) / 'installed.txt'
+            # The NuGet cache offers 770; the Store already updated the guest's framework to 994.
+            self.write_msix(deps / 'Microsoft.WindowsAppRuntime.1.8.msix', framework, '8000.770.0.0')
+            self.write_msix(deps / 'Main.x64.msix', main, '8000.770.0.0')
+            main_full = f'{main}_8000.770.0.0_x64__8wekyb3d8bbwe'
+            output = self.run_pwsh(f"""
+New-Fake '{framework}_8000.994.0.0_x64__8wekyb3d8bbwe'
+$global:Offers['Main.x64.msix'] = '{main_full}'
+$global:Offers['Microsoft.WindowsAppRuntime.1.8.msix'] = '{framework}_8000.770.0.0_x64__8wekyb3d8bbwe'
+& '{self.windows(self.APP_TEST_DIR / 'install-package.ps1')}' -Deps '{self.windows(deps)}' -Record '{self.windows(record)}'
+""")
+            self.assertIn(f'kept installed 8000.994.0.0: {framework} (offered 8000.770.0.0)', output)
+            self.assertIn(f'installed: {main_full}', output)
+            self.assertEqual(record.read_text().split(), [main_full])
+
+    def test_updated_packages_are_removed_and_frameworks_in_use_are_kept(self):
         framework = 'Microsoft.WindowsAppRuntime.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
         main = 'MicrosoftCorporationII.WinAppRuntime.Main.1.8_8000.{}.0.0_x64__8wekyb3d8bbwe'
         app = 'Example.TestApp_1.0.0.9_x64__abcdefghijklm'
@@ -126,22 +180,15 @@ function Remove-AppxPackage {
             # The test recorded the 770 runtime and the app; the Store then updated the runtime to 994.
             record = Path(directory) / 'installed.txt'
             record.write_text('\n'.join([framework.format(770), main.format(770), app]) + '\n')
-            windows = lambda path: subprocess.check_output(['wslpath', '-w', str(path)], text=True).strip()
-            script = self.FAKES + f"""
+            output = self.run_pwsh(f"""
 New-Fake '{framework.format(994)}'
 New-Fake '{x86_framework}'
 New-Fake '{main.format(994)}' @('{framework.format(994)}')
 New-Fake '{app}' @('{framework.format(994)}')
 New-Fake 'Microsoft.DesktopAppInstaller_1.27.0.0_x64__8wekyb3d8bbwe' @('{framework.format(994)}')
-& '{windows(self.SCRIPT)}' -Record '{windows(record)}'
+& '{self.windows(self.APP_TEST_DIR / 'remove-packages.ps1')}' -Record '{self.windows(record)}'
 'left: ' + (($global:Fake | ForEach-Object PackageFullName) -join ' ')
-"""
-            # Bypass applies to this process only: scripts on the WSL share count as remote and unsigned.
-            result = subprocess.run(['pwsh.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                                     '-Command', script],
-                                    capture_output=True, text=True, timeout=120)
-            output = result.stdout.replace('\r', '')
-            self.assertEqual(result.returncode, 0, output + result.stderr)
+""")
             self.assertIn(f'removed: {app}', output)
             self.assertIn(f'removed: {main.format(994)}', output)
             self.assertIn(f'kept {framework.format(994)}, in use by Microsoft.DesktopAppInstaller', output)
