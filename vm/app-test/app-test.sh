@@ -10,6 +10,7 @@
 #   app_test_get out/name.png ./shots/     # copy back from C:\apptest\
 #   app_test_screendump ./shots/full.png   # whole guest screen through the QEMU monitor
 #   app_test_effects                       # windows-dev only: rounded corners, shadows and Mica
+#   app_test_clock                         # Toronto time zone and a clock resync at every boot
 #   app_test_clean                         # undo the session and remove C:\apptest, whoever left it
 # Scripts that drive UI dot-source C:\apptest\ui-lib.ps1 and save shots in C:\apptest\out.
 #
@@ -148,6 +149,16 @@ app_test_effects() {
     app_test_ssh 'reg add HKLM\SOFTWARE\Microsoft\Windows\Dwm /v ForceEffectMode /t REG_DWORD /d 2 /f >nul && reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize /v EnableTransparency /t REG_DWORD /d 1 /f >nul' || return 1
     echo "app-test: window effects set; restarting windows-dev to apply them"
     app_test_restart 10 && echo "app-test: window effects are on"
+}
+
+# Set the guest's clock up: the Eastern time zone that matches the container's TZ, a "Clock resync"
+# task at every boot, and a resync now (vm/oem/guest-clock.ps1). Fresh installs run it from
+# oem/install.bat; this applies it to a guest installed before that. Safe to re-run; no restart.
+app_test_clock() {
+    local script
+    script="$(dirname "${BASH_SOURCE[0]}")/../oem/guest-clock.ps1"
+    _app_test_copy "$script" 'C:/OEM/guest-clock.ps1' || return 1
+    app_test_ps 'C:\OEM\guest-clock.ps1'
 }
 
 # Restart the guest and wait, up to $1 minutes, until it answers over SSH again. Waits for SSH to stop

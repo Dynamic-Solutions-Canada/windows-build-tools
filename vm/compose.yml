@@ -13,6 +13,10 @@ services:
       - ${HOME}/.secrets/windows-build-tools/windows-dev/vm.env
     environment:
       VERSION: "11"
+      # The image runs QEMU with "-rtc base=localtime", so the guest's hardware clock holds this
+      # container's local time. oem/guest-clock.ps1 sets the guest to the matching Eastern time
+      # zone; without both, a UTC container and the image's default Pacific guest boot 8 hours ahead.
+      TZ: "America/Toronto"
       # WSL shares about 15 GiB with Paseo and its agents. 4G guest under a 5G hard
       # container cap keeps the machine's 4 GiB safety margin; raise both together
       # only after WSL's own memory limit is increased.

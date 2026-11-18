@@ -16,6 +16,10 @@ services:
     environment:
       # Windows 10 Pro 22H2 (build 19045), the family's minimum (D-018).
       VERSION: "10"
+      # The image runs QEMU with "-rtc base=localtime", so the guest's hardware clock holds this
+      # container's local time. oem/guest-clock.ps1 sets the guest to the matching Eastern time
+      # zone; without both, a UTC container and the image's default Pacific guest boot 8 hours ahead.
+      TZ: "America/Toronto"
       # Smaller than the build VM: it only runs the app under test. A 3G guest under a 3.5G hard
       # cap keeps WSL's 2.5 GiB safety margin when about 6 GiB is free; check `free -m` first.
       RAM_SIZE: "3G"
