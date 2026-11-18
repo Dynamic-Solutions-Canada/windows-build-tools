@@ -5,16 +5,17 @@ Prepare a test guest's desktop for screenshots, and put it back afterwards.
 .DESCRIPTION
 -Mode Prepare saves the current settings to C:\apptest\desktop, then sets the screenshot desktop:
 the wallpaper (Windows 11's dark bloom, img19.jpg, by default), desktop icons hidden, the taskbar
-search box and Widgets off, every pin that Windows lets a script remove taken off the taskbar, dark
-mode for Windows and apps, transparency effects on, and the screen at 1920 x 1080 (not persisted, so
+search box, Widgets and app notifications off, every pin that Windows lets a script remove taken off
+the taskbar, dark mode for Windows and apps, transparency effects on, and the screen at 1920 x 1080 (not persisted, so
 a guest restart also returns it to its usual size). Running it again keeps the settings saved the
 first time, so a second Prepare never makes the screenshot desktop the one Restore returns to.
 
 Both modes first close any popup menu left open, so a stale menu cannot leak into captures or tests.
 
--Mode Restore puts every saved setting back, including the taskbar pins, and deletes the saved copy.
-It also works from a later session or after a failed capture, since everything it needs is in the
-saved copy; app_test_clean runs it before removing C:\apptest.
+-Mode Restore puts every saved setting back, including the taskbar pins exactly as they were (any pin
+a test added is removed), and deletes the saved copy. It also works from a later session or after a
+failed capture, since everything it needs is in the saved copy; app_test_clean runs it before
+removing C:\apptest.
 
 Run it in the desktop session (app_test_run): wallpaper, theme and Explorer changes made over SSH do
 not reach the screen. It restarts Explorer once, to apply the search box, Widgets and pin changes,
@@ -84,6 +85,9 @@ $Settings = @(
     @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'; Name = 'SystemUsesLightTheme'; Value = 0 }
     @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'; Name = 'EnableTransparency'; Value = 1 }
     @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'; Name = 'SearchboxTaskbarMode'; Value = 0 }
+    # App notifications (toasts) off for the session ("Notifications" in Settings), so a late toast,
+    # such as Windows' own pin request, cannot appear in a capture.
+    @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'ToastEnabled'; Value = 0 }
     # The documented "Allow widgets" policy; the per-user TaskbarDa value is write-protected (UCPD).
     @{ Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'; Name = 'AllowNewsAndInterests'; Value = 0 }
 )
@@ -205,6 +209,18 @@ function Set-DisplaySize([string]$Size) {
     Start-Sleep -Seconds 3
 }
 
+<#
+Restart this user's notification service (WpnUserService_<suffix>), so it rereads ToastEnabled: the
+running service ignores a changed value, and a toast still appeared until it was restarted.
+#>
+function Restart-NotificationService {
+    $service = Get-Service 'WpnUserService_*' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($service) {
+        Restart-Service $service.Name -Force
+        Start-Sleep -Seconds 2
+    }
+}
+
 <# Unpin every app whose shell item offers "Unpin from taskbar", and return their names. #>
 function Remove-TaskbarPins {
     $apps = (New-Object -ComObject Shell.Application).NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}').Items()
@@ -262,14 +278,32 @@ function Invoke-Prepare {
     }
     $unpinned = @(Remove-TaskbarPins)
     Set-DisplaySize "$($Width)x$($Height)"
+    Restart-NotificationService
     Restart-Explorer
     Set-DesktopIcons $false
     Set-Wallpaper $wallpaperPath
     Send-ThemeChange
 
-    Write-Output "prepared: wallpaper $Wallpaper, dark mode for Windows and apps, transparency on, screen $(Get-DisplaySize), desktop icons, search box and Widgets hidden"
+    Write-Output "prepared: wallpaper $Wallpaper, dark mode for Windows and apps, transparency on, screen $(Get-DisplaySize), notifications off, desktop icons, search box and Widgets hidden"
     if ($unpinned) { Write-Output "unpinned: $($unpinned -join ', ')" }
     Write-EffectsStatus
+}
+
+<#
+Put the taskbar pins back exactly as saved: the Taskband record replaced wholesale, and the pinned
+shortcuts folder emptied and refilled. Pins a test added during the session go too; deleting only a
+pin's shortcut leaves a dead button, because Windows 11 keeps the pin in the Taskband record.
+Explorer rereads both when Restore restarts it.
+#>
+function Restore-TaskbarPins {
+    Invoke-Reg 'delete', $TaskbandKey, '/f' -AllowFailure
+    Invoke-Reg 'import', (Join-Path $State 'taskband.reg')
+    New-Item -ItemType Directory -Force $PinnedFolder | Out-Null
+    Get-ChildItem $PinnedFolder -Force | Remove-Item -Recurse -Force
+    $pins = Join-Path $State 'pins'
+    if (Test-Path $pins) {
+        Copy-Item "$pins\*" $PinnedFolder -Recurse -Force
+    }
 }
 
 <# Put back everything Save-DesktopState saved, then delete the saved copy. #>
@@ -283,15 +317,9 @@ function Invoke-Restore {
     foreach ($value in $saved.Values) {
         Set-RegistryValue $value.Key $value.Name $value.Value
     }
-    # Replace the pin list wholesale, so pins added by Prepare's unpinning are not merged back in.
-    Invoke-Reg 'delete', $TaskbandKey, '/f' -AllowFailure
-    Invoke-Reg 'import', (Join-Path $State 'taskband.reg')
-    $pins = Join-Path $State 'pins'
-    if (Test-Path $pins) {
-        New-Item -ItemType Directory -Force $PinnedFolder | Out-Null
-        Copy-Item "$pins\*" $PinnedFolder -Force
-    }
+    Restore-TaskbarPins
     if ($saved.DisplaySize) { Set-DisplaySize $saved.DisplaySize }
+    Restart-NotificationService
     Restart-Explorer
     Set-DesktopIcons ([bool]$saved.DesktopIcons)
     if ($saved.Wallpaper) { Set-Wallpaper $saved.Wallpaper }
