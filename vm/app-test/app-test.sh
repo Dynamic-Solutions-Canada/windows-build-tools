@@ -161,20 +161,33 @@ app_test_clock() {
     app_test_ps 'C:\OEM\guest-clock.ps1'
 }
 
-# Restart the guest and wait, up to $1 minutes, until it answers over SSH again. Waits for SSH to stop
-# answering first, so a guest that is still shutting down is never taken for one that is back.
+# Restart the guest and wait, up to $1 minutes after it goes down, until it is back with a new boot
+# time. Watching the boot time, not SSH dropping, matters: a guest can reboot in about 20 seconds,
+# between two SSH checks, and a reboot that was never seen looked like one that never happened.
 app_test_restart() {
-    local deadline
+    local before after deadline
+    before=$(_app_test_boot_time) || return 1
     app_test_ssh 'shutdown /r /t 5 /c "app-test restart"' || return 1
-    deadline=$(( $(date +%s) + 300 ))
-    while app_test_ssh 'exit 0' 2>/dev/null; do
+    deadline=$(( $(date +%s) + 300 + $1 * 60 ))
+    while :; do
+        sleep 10
+        after=$(_app_test_boot_time 2>/dev/null)
+        if [[ -n "$after" && "$after" != "$before" ]]; then
+            return 0
+        fi
         if (( $(date +%s) >= deadline )); then
-            echo "app-test: $APP_TEST_CONTAINER did not shut down within 5 minutes" >&2
+            echo "app-test: $APP_TEST_CONTAINER did not restart within $(( 5 + $1 )) minutes" >&2
             return 1
         fi
-        sleep 5
     done
-    app_test_wait "$1"
+}
+
+# Print when the guest last booted, as .NET ticks; fails when the guest does not answer.
+_app_test_boot_time() {
+    local ticks
+    ticks=$(app_test_ssh 'powershell -NoProfile -Command (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.Ticks') || return 1
+    ticks="${ticks//[^0-9]/}"
+    [[ -n "$ticks" ]] && echo "$ticks"
 }
 
 # Wait until the guest answers over SSH, up to $1 minutes.

@@ -151,6 +151,62 @@ _app_test_copy() { echo "copy $*" >> "$LOG"; }
         self.assertNotIn('copy', log)
 
 
+class AppTestRestartTests(unittest.TestCase):
+    """app_test_restart waits for a new boot time, so a reboot between two checks still counts."""
+
+    APP_TEST = BRIDGE.parent / 'vm/app-test/app-test.sh'
+
+    # Stand-ins for the guest and the clock: the boot time query answers from $BOOTS, one line per
+    # call (an empty line is a guest that does not answer), and each date call is 60 seconds later.
+    STUBS = r'''
+APP_TEST_CONTAINER=windows-dev
+app_test_ssh() {
+    echo "ssh $*" >> "$LOG"
+    case "$*" in
+        *LastBootUpTime*)
+            local line
+            line=$(sed -n 1p "$BOOTS"); sed -i 1d "$BOOTS"
+            [[ -n "$line" ]] || return 255
+            printf '%s\r\n' "$line" ;;
+    esac
+}
+sleep() { :; }
+date() { local now=$(( $(cat "$CLOCK") + 60 )); echo "$now" > "$CLOCK"; echo "$now"; }
+'''
+
+    def restart(self, boots):
+        """Run app_test_restart 1 against boot time answers `boots`; return the result and log."""
+        with tempfile.TemporaryDirectory(prefix='app-test-restart-') as scratch:
+            log, boot_file, clock = (Path(scratch) / name for name in ('log', 'boots', 'clock'))
+            log.touch()
+            boot_file.write_text(''.join(f'{boot}\n' for boot in boots))
+            clock.write_text('0')
+            result = subprocess.run(['bash', '-c', f'source "{self.APP_TEST}"; {self.STUBS}\napp_test_restart 1'],
+                                    env=dict(os.environ, LOG=str(log), BOOTS=str(boot_file), CLOCK=str(clock)),
+                                    capture_output=True, text=True, timeout=30)
+            return result, log.read_text()
+
+    def test_a_reboot_between_two_checks_counts(self):
+        # The guest was already back, with a new boot time, at the first check after shutdown.
+        result, log = self.restart(['100', '200'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('shutdown /r', log)
+
+    def test_waits_while_the_guest_is_down_or_still_up(self):
+        result, _ = self.restart(['100', '100', '', '', '200'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fails_when_the_guest_never_reboots(self):
+        result, _ = self.restart(['100'] + ['100'] * 20)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('did not restart within 6 minutes', result.stderr)
+
+    def test_does_not_restart_a_guest_that_does_not_answer(self):
+        result, log = self.restart([''])
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn('shutdown', log)
+
+
 class AppTestPackageTests(unittest.TestCase):
     """install-package.ps1 and remove-packages.ps1 against fake package cmdlets, in the host's pwsh.exe.
 
