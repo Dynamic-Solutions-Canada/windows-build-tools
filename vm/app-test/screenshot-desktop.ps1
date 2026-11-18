@@ -10,6 +10,8 @@ mode for Windows and apps, transparency effects on, and the screen at 1920 x 108
 a guest restart also returns it to its usual size). Running it again keeps the settings saved the
 first time, so a second Prepare never makes the screenshot desktop the one Restore returns to.
 
+Both modes first close any popup menu left open, so a stale menu cannot leak into captures or tests.
+
 -Mode Restore puts every saved setting back, including the taskbar pins, and deletes the saved copy.
 It also works from a later session or after a failed capture, since everything it needs is in the
 saved copy; app_test_clean runs it before removing C:\apptest.
@@ -50,6 +52,7 @@ public static class DesktopNative {
   public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, string lParam, int flags, int timeout, out IntPtr result);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern IntPtr FindWindow(string className, string windowName);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string windowName);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -298,4 +301,20 @@ function Invoke-Restore {
     Write-Output 'restored the desktop settings saved before Prepare'
 }
 
+<#
+Close any popup menu left open, for example by an earlier test run, so it cannot appear in a capture
+or be taken for the menu a later test opens. Presses Escape once per open menu level; EndMenu would
+only close a menu of this script's own thread.
+#>
+function Close-OpenMenus {
+    for ($level = 0; $level -lt 5; $level++) {
+        if ([DesktopNative]::FindWindow('#32768', [NullString]::Value) -eq [IntPtr]::Zero) { return }
+        [DesktopNative]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)   # Escape down
+        [DesktopNative]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero)   # Escape up
+        Start-Sleep -Milliseconds 300
+    }
+    Write-Output 'warning: a popup menu is still open after pressing Escape five times'
+}
+
+Close-OpenMenus
 if ($Mode -eq 'Prepare') { Invoke-Prepare } else { Invoke-Restore }

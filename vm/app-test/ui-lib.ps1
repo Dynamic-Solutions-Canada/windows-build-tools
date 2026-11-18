@@ -3,6 +3,59 @@ Helpers for driving and capturing apps in the guest's desktop session (dot-sourc
 Run only through run-interactive.ps1: UI Automation and screen capture need the desktop session.
 #>
 Add-Type -AssemblyName UIAutomationClient, System.Drawing, System.Windows.Forms
+Add-Type -ReferencedAssemblies Accessibility @"
+using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class UiMenu {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr h, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object obj);
+
+  public class Item { public int Index; public string Name; public bool Enabled; }
+
+  // The open popup menu's client accessible object (OBJID_CLIENT), or null when no menu is open.
+  // The topmost visible #32768 window is the most recently opened (sub)menu.
+  static Accessibility.IAccessible OpenMenu() {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => {
+      var name = new StringBuilder(16);
+      GetClassName(h, name, 16);
+      if (name.ToString() == "#32768" && IsWindowVisible(h)) { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    if (found == IntPtr.Zero) return null;
+    Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");   // IID_IAccessible
+    object acc;
+    if (AccessibleObjectFromWindow(found, 0xFFFFFFFC, ref iid, out acc) != 0) return null;
+    return acc as Accessibility.IAccessible;
+  }
+
+  // Whether a popup menu is open.
+  public static bool IsOpen() { return OpenMenu() != null; }
+
+  // The open menu's items, without separators (role 21); empty when no menu is open.
+  public static List<Item> Items() {
+    var items = new List<Item>();
+    var menu = OpenMenu();
+    if (menu == null) return items;
+    for (int child = 1; child <= menu.accChildCount; child++) {
+      if ((int)menu.get_accRole(child) != 12) continue;   // ROLE_SYSTEM_MENUITEM
+      int state = (int)menu.get_accState(child);
+      items.Add(new Item { Index = child, Name = menu.get_accName(child), Enabled = (state & 0x1) == 0 });   // STATE_SYSTEM_UNAVAILABLE
+    }
+    return items;
+  }
+
+  // Run an item's default action (choose it). Returns false when no menu is open.
+  public static bool Choose(int index) {
+    var menu = OpenMenu();
+    if (menu == null) return false;
+    menu.accDoDefaultAction(index);
+    return true;
+  }
+}
+"@
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class UiNative {
@@ -233,8 +286,9 @@ and return it as a UI Automation element (click it with Invoke-Click), or $null.
 icons (AutomationId NotifyItemIcon): a search for a Button named after the app finds its taskbar
 button first. Looks in the visible tray, then opens "Show Hidden Icons" and looks in the overflow,
 which stays open when the icon is found there and is closed again when it is not.
-Whether Windows 11 exposes a tray icon's menu items to UI Automation is under investigation: look
-for them from $UiRoot, since the menu is a top-level #32768 popup, not part of the app's window.
+A tray icon's menu is a standard Win32 popup menu (a top-level #32768 window), which the managed
+UI Automation client used here shows as an empty pane; read and choose its items with Get-MenuItems
+and Invoke-MenuItem instead.
 #>
 function Find-TrayIcon([string]$TooltipPrefix) {
     $isIcon = New-Object System.Windows.Automation.PropertyCondition($UiA::AutomationIdProperty, 'NotifyItemIcon')
@@ -259,4 +313,30 @@ function Find-TrayIcon([string]$TooltipPrefix) {
         Start-Sleep -Seconds 1
     }
     $icon
+}
+
+<#
+The items of the open popup menu (a tray icon's menu, a window's Alt+Space menu, or any other
+standard Win32 menu), as objects with Index, Name and Enabled; separators are left out. Returns an
+empty list when no menu is open. Reads them through MSAA, because the managed UI Automation client
+shows a #32768 menu as an empty pane; native UI Automation and Narrator read them through the
+system's menu proxy, so this is a limit of this script's client, not of the app.
+#>
+function Get-MenuItems {
+    [UiMenu]::Items()
+}
+
+<#
+Choose an item of the open popup menu by its text, ignoring the "&" access-key marker and any
+shortcut text after a tab. Throws when no menu is open, or no enabled item has that text. Open the
+menu yourself immediately before calling this: it acts on whichever popup menu is open, which could
+be one left by something else.
+#>
+function Invoke-MenuItem([string]$Name) {
+    if (-not [UiMenu]::IsOpen()) { throw "No popup menu is open" }
+    $items = @(Get-MenuItems)
+    $item = $items | Where-Object { $_.Enabled -and $_.Name.Replace('&', '').Split("`t")[0] -eq $Name } | Select-Object -First 1
+    if (-not $item) { throw "The open menu has no enabled item '$Name' (items: $(($items | ForEach-Object Name) -join ', '))" }
+    [UiMenu]::Choose($item.Index) | Out-Null
+    Start-Sleep -Milliseconds 500
 }
