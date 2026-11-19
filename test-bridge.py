@@ -4,6 +4,7 @@ Packaging is a tiny fixture, not an app build. Full app MSIX builds are verified
 separately. No fixture touches certificate stores or installed packages.
 """
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -364,6 +365,33 @@ New-Fake 'Microsoft.DesktopAppInstaller_1.27.0.0_x64__8wekyb3d8bbwe' @('{framewo
             self.assertIn(x86_framework, left)
             self.assertNotIn(main.format(994), left)
             self.assertFalse(record.exists())
+
+
+class SnapshotSourceTests(unittest.TestCase):
+    """snapshot_source copies the working tree but never agent folders or nested worktrees."""
+
+    def test_skips_agent_folders_and_worktrees(self):
+        spec = importlib.util.spec_from_file_location('windows_build', BRIDGE)
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-snapshot-') as directory:
+            repo, target = Path(directory) / 'repo', Path(directory) / 'stage'
+            for relative in ('App/App.cs', '.agents/skills/release/SKILL.md',
+                             '.worktrees/feature/App/App.cs', '.worktrees/feature/.git'):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative)
+            (repo / '.claude').mkdir()
+            (repo / '.claude/skills').symlink_to('../.agents/skills')
+            # A worktree carries its own agent symlink, which would otherwise fail the symlink check.
+            (repo / '.worktrees/feature/.claude').mkdir()
+            (repo / '.worktrees/feature/.claude/skills').symlink_to('../.agents/skills')
+
+            bridge.snapshot_source(repo, target)
+
+            staged = sorted(str(path.relative_to(target)) for path in target.rglob('*') if path.is_file())
+            self.assertEqual(staged, ['App/App.cs'])
+            self.assertTrue((repo / '.worktrees/feature/App/App.cs').is_file())
 
 
 class BridgeTests(unittest.TestCase):

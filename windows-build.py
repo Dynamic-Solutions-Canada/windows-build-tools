@@ -21,6 +21,9 @@ EXCLUDED_DIRECTORIES = {
     # .claude/skills -> ../.agents/skills symlink (AI-8) out of the symlink check below, in the repo
     # and in any submodule (such as a kit) that carries one. The working tree keeps both folders.
     '.claude', '.agents',
+    # Git worktrees live inside each checkout (D-032). Each is a whole second working tree, often of
+    # another branch, so staging it would copy that branch's source into this build.
+    '.worktrees',
 }
 
 

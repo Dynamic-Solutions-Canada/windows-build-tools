@@ -38,7 +38,7 @@ The helper copies the current working tree, including uncommitted changes,
 submodule source and local build inputs, into a unique directory under the
 Windows user's `%TEMP%\WindowsAppBuilds` on C:. Git metadata, node_modules,
 bin/obj, package layouts, previous artifacts and agent folders (`.claude`,
-`.agents`, which hold the tracked `.claude/skills` symlink) are excluded; any other
+`.agents`, which hold the tracked `.claude/skills` symlink) and nested Git worktrees (`.worktrees`) are excluded; any other
 symlink stops the build. It runs Windows
 build tools there, returns logs and packages to
 `.artifacts/windows-build/<build-id>/`, then deletes that invocation's Windows
