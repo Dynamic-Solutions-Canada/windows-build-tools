@@ -41,7 +41,7 @@ bin/obj, package layouts, previous artifacts and agent folders (`.claude`,
 `.agents`, which hold the tracked `.claude/skills` symlink) and nested Git worktrees (`.worktrees`) are excluded; any other
 symlink stops the build. It runs Windows
 build tools there, returns logs and packages to
-`.artifacts/windows-build/<build-id>/`, then deletes that invocation's Windows
+`.artifacts/windows-build/<build-id>/`, merges any named deliverables a successful build wrote in its `.artifacts/packages/<version>/` (LAYOUT-12, winui-app-kit's packaging script from v2.2.0) into the repository's own `.artifacts/packages/`, replacing same-named files, then deletes that invocation's Windows
 temporary directory on success or failure. Cancellation stops that build's
 process tree before cleanup. If it cannot confirm the process stopped, it
 reports and preserves the directory for recovery rather than deleting active

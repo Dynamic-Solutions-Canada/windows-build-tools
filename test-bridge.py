@@ -19,6 +19,8 @@ import signal
 
 import build_lock
 import host_platform
+import staged_packages
+import vm_transport
 
 BRIDGE = Path(__file__).with_name('windows-build.py')
 
@@ -46,6 +48,10 @@ if (Test-Path (Join-Path $root 'App/bin/stale.txt')) { throw 'Old build output w
 foreach ($inputPath in @('App/changed.txt', 'external/promo/uncommitted.txt', 'local.secrets.props', 'AppMSIX/App.pfx')) {
     if ((Get-Content -LiteralPath (Join-Path $root $inputPath) -Raw) -ne 'working-tree') { throw "Missing current input: $inputPath" }
 }
+# Named LAYOUT-12 copies, written before the failure check so a failed build has some too.
+$named = Join-Path $root '.artifacts/packages/1.0.0'
+New-Item -ItemType Directory -Path $named -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $named 'App-1.0.0-win-x64.msix') -Value 'named'
 if (Test-Path (Join-Path $root 'fail')) { exit 9 }
 if (Test-Path (Join-Path $root 'delay')) { Start-Sleep -Seconds 60 }
 $output = Join-Path $PSScriptRoot 'bin/msix-output'
@@ -367,6 +373,53 @@ New-Fake 'Microsoft.DesktopAppInstaller_1.27.0.0_x64__8wekyb3d8bbwe' @('{framewo
             self.assertFalse(record.exists())
 
 
+class StagedPackagesTests(unittest.TestCase):
+    """Named deliverables (LAYOUT-12) come back from the stage into the repository's .artifacts/packages."""
+
+    @staticmethod
+    def write(root, files):
+        """Create each relative path in `files` under root, holding the given text."""
+        for relative, text in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def test_merges_overwriting_same_names_and_keeping_the_rest(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-packages-') as directory:
+            stage, repo = Path(directory) / 'stage', Path(directory) / 'repo'
+            self.write(stage, {'.artifacts/packages/2.2.0/App-2.2.0-win-x64.msix': 'new',
+                               '.artifacts/packages/2.2.0/App-2.2.0-win-arm64.msix': 'new arm'})
+            self.write(repo, {'.artifacts/packages/2.2.0/App-2.2.0-win-x64.msix': 'old',
+                              '.artifacts/packages/2.1.0/App-2.1.0-win-x64.msix': 'older version'})
+
+            merged = staged_packages.merge_staged_packages(stage, repo)
+
+            packages = repo / '.artifacts/packages'
+            self.assertEqual(merged, [packages / '2.2.0/App-2.2.0-win-arm64.msix', packages / '2.2.0/App-2.2.0-win-x64.msix'])
+            self.assertEqual((packages / '2.2.0/App-2.2.0-win-x64.msix').read_text(), 'new')
+            self.assertEqual((packages / '2.1.0/App-2.1.0-win-x64.msix').read_text(), 'older version')
+
+    def test_no_packages_folder_is_a_no_op(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-packages-') as directory:
+            stage, repo = Path(directory) / 'stage', Path(directory) / 'repo'
+            stage.mkdir()
+            repo.mkdir()
+            self.assertEqual(staged_packages.merge_staged_packages(stage, repo), [])
+            self.assertFalse((repo / '.artifacts').exists())
+
+    def test_vm_merges_only_a_successful_build_and_drops_the_downloaded_copy(self):
+        for succeeded in (True, False):
+            with self.subTest(succeeded=succeeded), tempfile.TemporaryDirectory(prefix='windows-bridge-packages-') as directory:
+                output, repo = Path(directory) / 'output', Path(directory) / 'repo'
+                self.write(output, {'source/.artifacts/packages/2.2.0/App-2.2.0-win-x64.msix': 'new'})
+                repo.mkdir()
+
+                vm_transport._merge_packages(output, repo, succeeded=succeeded)
+
+                self.assertEqual((repo / '.artifacts/packages/2.2.0/App-2.2.0-win-x64.msix').exists(), succeeded)
+                self.assertFalse((output / 'source').exists())
+
+
 class SnapshotSourceTests(unittest.TestCase):
     """snapshot_source copies the working tree but never agent folders or nested worktrees."""
 
@@ -433,6 +486,9 @@ class BridgeTests(unittest.TestCase):
             self.assertFalse(Path(linux_stage).exists(), result.stdout)
             self.assertEqual((root / 'App/changed.txt').read_text(), 'working-tree')
             self.assertEqual((root / 'App/bin/stale.txt').read_text(), 'stale')
+            # Only a build that succeeded brings its named packages back.
+            named = root / '.artifacts/packages/1.0.0/App-1.0.0-win-x64.msix'
+            self.assertEqual(named.exists(), not fail, result.stdout)
             return windows_stage
 
     def test_success_preserves_current_inputs_and_cleans_stage(self):

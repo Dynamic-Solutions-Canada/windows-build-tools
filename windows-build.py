@@ -13,6 +13,7 @@ import uuid
 
 import build_lock
 import host_platform
+import staged_packages
 
 EXCLUDED_DIRECTORIES = {
     '.git', '.vs', '.crashdiag', 'bin', 'obj', 'node_modules',
@@ -312,6 +313,11 @@ def main():
                     shutil.copy2(stage / name, output / name)
             if (stage / 'artifacts').exists():
                 shutil.copytree(stage / 'artifacts', output / 'artifacts')
+            # Named deliverables (LAYOUT-12) only from a build that succeeded, so a failed run
+            # never replaces a good package of the same name.
+            if code == 0:
+                for package in staged_packages.merge_staged_packages(stage / 'source', repo):
+                    print(f'Package copy: {package}', flush=True)
         finally:
             resolved = stage.resolve()
             if resolved.parent != stage_parent.resolve() or not resolved.name.startswith(repo.name + '-'):

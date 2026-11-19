@@ -12,11 +12,14 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import uuid
+
+import staged_packages
 
 SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
 RETURNED_FILES = ('build.log', 'console.log', 'result.json')
@@ -89,9 +92,14 @@ def _upload(host, local_stage, remote_stage):
                        stdin=archive, check=True)
 
 
+# The named deliverables a LAYOUT-12 packaging script writes in the staged source. They arrive in
+# the build's output folder first, and run() merges them into the repository from there.
+STAGED_PACKAGES = 'source/.artifacts/packages'
+
+
 def _download(host, remote_stage, output):
-    """Copy back whichever logs, result and artifacts exist; a failed build has fewer."""
-    candidates = ', '.join(f"'{name}'" for name in (*RETURNED_FILES, 'artifacts'))
+    """Copy back whichever logs, result, artifacts and named packages exist; a failed build has fewer."""
+    candidates = ', '.join(f"'{name}'" for name in (*RETURNED_FILES, 'artifacts', STAGED_PACKAGES))
     listing = _pwsh(host, f"Set-Location '{remote_stage}'; @({candidates}) | Where-Object {{ Test-Path $_ }}",
                     capture_output=True, text=True)
     names = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
@@ -103,6 +111,22 @@ def _download(host, remote_stage, output):
         archive.seek(0)
         with tarfile.open(fileobj=archive, mode='r') as tar:
             tar.extractall(output, filter='data')
+
+
+def _merge_packages(output, repo, succeeded):
+    """Merge the downloaded named packages into the repository, then drop the downloaded copy.
+
+    Only a build that succeeded contributes, so a failed run never replaces a good package of the
+    same name. The copy under output/source is removed either way: the build's output folder holds
+    logs and artifacts, not a partial source tree.
+    """
+    staged_source = output / 'source'
+    try:
+        if succeeded:
+            for package in staged_packages.merge_staged_packages(staged_source, repo):
+                print(f'Package copy: {package}', flush=True)
+    finally:
+        shutil.rmtree(staged_source, ignore_errors=True)
 
 
 def _stop_remote_tree(host, remote_stage):
@@ -179,6 +203,7 @@ def run(args, repo, config, snapshot_source, scripts_dir):
         # Phase 3: return results, then remove the VM stage unless a build may still run.
         try:
             _download(host, remote_stage, output)
+            _merge_packages(output, repo, succeeded=code == 0)
         finally:
             if cleanup_allowed:
                 _pwsh(host, f"Remove-Item -LiteralPath '{remote_stage}' -Recurse -Force", check=False)
