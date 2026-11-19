@@ -45,7 +45,7 @@ build tools there, returns logs and packages to
 temporary directory on success or failure. Cancellation stops that build's
 process tree before cleanup. If it cannot confirm the process stopped, it
 reports and preserves the directory for recovery rather than deleting active
-inputs. Build IDs are UTC identifiers, not displayed appointment times.
+inputs. A delete that fails is reported with the folder's path and never changes the build's exit code; the transient "Cannot allocate memory" that WSL's `/mnt/c` client can return when memory is fragmented is retried first. Each build starts by removing the bridge's own stage folders left untouched for over a day, and prints each one it removed. Build IDs are UTC identifiers, not displayed appointment times.
 
 Build and install commands assign a higher four-part dev version only in the
 temporary source copy. Tracked release versions stay unchanged. A per-app Windows

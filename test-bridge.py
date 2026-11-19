@@ -4,7 +4,9 @@ Packaging is a tiny fixture, not an app build. Full app MSIX builds are verified
 separately. No fixture touches certificate stores or installed packages.
 """
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,7 @@ import signal
 
 import build_lock
 import host_platform
+import stage_cleanup
 import staged_packages
 import vm_transport
 
@@ -57,6 +60,28 @@ if (Test-Path (Join-Path $root 'delay')) { Start-Sleep -Seconds 60 }
 $output = Join-Path $PSScriptRoot 'bin/msix-output'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $output 'fixture.msix') -Value 'fixture only'
+'''
+
+
+# Runs windows-build.py with its stage deletes failing like the /mnt/c client's transient ENOMEM:
+# the first $STAGE_FAILURES deletes of a folder named $STAGE_PREFIX* fail (-1: every one).
+CLEANUP_FAULT = r'''
+import errno, os, runpy, shutil, sys
+sys.path.insert(0, os.path.dirname(os.environ['BRIDGE']))
+import stage_cleanup
+stage_cleanup.RETRY_DELAY_SECONDS = 0
+failures, prefix, real_rmtree = int(os.environ['STAGE_FAILURES']), os.environ['STAGE_PREFIX'], shutil.rmtree
+calls = 0
+def rmtree(path, *args, **kwargs):
+    global calls
+    if os.path.basename(str(path)).startswith(prefix):
+        calls += 1
+        if failures < 0 or calls <= failures:
+            raise OSError(errno.ENOMEM, 'Cannot allocate memory', str(path))
+    return real_rmtree(path, *args, **kwargs)
+shutil.rmtree = rmtree
+sys.argv = [os.environ['BRIDGE']] + sys.argv[1:]
+runpy.run_path(os.environ['BRIDGE'], run_name='__main__')
 '''
 
 
@@ -373,6 +398,65 @@ New-Fake 'Microsoft.DesktopAppInstaller_1.27.0.0_x64__8wekyb3d8bbwe' @('{framewo
             self.assertFalse(record.exists())
 
 
+class StageCleanupTests(unittest.TestCase):
+    """Stage deletion retries the transient ENOMEM, reports what it cannot remove, and prunes old stages."""
+
+    ENOMEM = OSError(errno.ENOMEM, 'Cannot allocate memory')
+
+    def setUp(self):
+        patcher = mock.patch.object(stage_cleanup, 'RETRY_DELAY_SECONDS', 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_retries_enomem_until_the_delete_succeeds(self):
+        with mock.patch.object(stage_cleanup.shutil, 'rmtree', side_effect=[self.ENOMEM, None]) as rmtree:
+            self.assertTrue(stage_cleanup.remove_stage(Path('/stage')))
+        self.assertEqual(rmtree.call_count, 2)
+
+    def test_reports_a_stage_that_keeps_failing(self):
+        with mock.patch.object(stage_cleanup.shutil, 'rmtree', side_effect=self.ENOMEM) as rmtree, \
+                mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.assertFalse(stage_cleanup.remove_stage(Path('/stage')))
+        self.assertEqual(rmtree.call_count, stage_cleanup.REMOVE_ATTEMPTS)
+        self.assertIn('stage not removed (Cannot allocate memory): /stage; delete it later', stderr.getvalue())
+
+    def test_does_not_retry_other_errors(self):
+        denied = OSError(errno.EACCES, 'Permission denied')
+        with mock.patch.object(stage_cleanup.shutil, 'rmtree', side_effect=denied) as rmtree, \
+                mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.assertFalse(stage_cleanup.remove_stage(Path('/stage')))
+        self.assertEqual(rmtree.call_count, 1)
+
+    def test_prunes_only_old_folders_named_like_a_stage(self):
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-prune-') as directory:
+            parent = Path(directory)
+            now = time.time()
+            two_days_ago = now - 2 * 24 * 60 * 60
+
+            def folder(name, age_from=two_days_ago, with_log=None):
+                """Create a folder holding build.log, both dated age_from (or the log dated with_log)."""
+                path = parent / name
+                path.mkdir()
+                log = path / 'build.log'
+                log.write_text('log')
+                os.utime(log, (with_log or age_from,) * 2)
+                os.utime(path, (age_from,) * 2)
+                return path
+
+            old = folder('immich-drive-htm0wm1g')
+            fresh = folder('immich-drive-abcd1234', age_from=now)
+            still_logging = folder('repilot-zz9_8x7w', with_log=now)
+            not_a_stage = folder('keep-me')
+            (parent / 'loose-file-12345678').write_text('file')
+
+            removed = stage_cleanup.prune_old_stages(parent, now=now)
+
+            self.assertEqual(removed, [old])
+            self.assertFalse(old.exists())
+            for kept in (fresh, still_logging, not_a_stage, parent / 'loose-file-12345678'):
+                self.assertTrue(kept.exists(), kept)
+
+
 class StagedPackagesTests(unittest.TestCase):
     """Named deliverables (LAYOUT-12) come back from the stage into the repository's .artifacts/packages."""
 
@@ -450,29 +534,51 @@ class SnapshotSourceTests(unittest.TestCase):
 class BridgeTests(unittest.TestCase):
     """Check the OS boundary and cleanup policy with lightweight Windows fixtures."""
 
-    def run_fixture(self, fail=False):
+    @staticmethod
+    def make_fixture_repo(root, fail=False):
+        """A packaging repo whose fake script checks what was staged; `fail` makes it exit 9."""
+        for relative in ('App/changed.txt', 'external/promo/uncommitted.txt',
+                         'local.secrets.props', 'AppMSIX/App.pfx'):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('working-tree')
+        (root / '.git').mkdir()
+        (root / '.git/private-metadata').write_text('not source')
+        (root / 'external/promo/.git').write_text('gitdir: absent')
+        (root / 'App/bin').mkdir()
+        (root / 'App/bin/stale.txt').write_text('stale')
+        (root / 'App/App.csproj').write_text('<Project />')
+        (root / 'AppMSIX/build-msix.ps1').write_text(PACKAGE_FIXTURE)
+        if fail:
+            (root / 'fail').touch()
+        (root / 'windows-build.json').write_text(json.dumps({
+            'project': 'App/App.csproj', 'package_script': 'AppMSIX/build-msix.ps1',
+            'package_output': 'AppMSIX/bin/msix-output', 'certificate': 'AppMSIX/App.pfx',
+        }))
+
+    @staticmethod
+    def run_bridge(root, stage_failures=None):
+        """Run the bridge on root; with stage_failures, through CLEANUP_FAULT (-1: every delete fails)."""
+        if stage_failures is None:
+            command, env = ['python3', str(BRIDGE)], os.environ
+        else:
+            command = ['python3', '-c', CLEANUP_FAULT]
+            env = dict(os.environ, BRIDGE=str(BRIDGE), STAGE_FAILURES=str(stage_failures), STAGE_PREFIX=root.name + '-')
+        return subprocess.run([*command, '--repo', str(root)], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    @staticmethod
+    def staged_path(result):
+        """The WSL path of the stage a bridge run announced in its "Staging ... in <path>" line."""
+        line = next(line for line in result.stdout.splitlines() if line.startswith('Staging '))
+        windows_stage = line.split(' in ', 1)[1]
+        return windows_stage, Path(subprocess.check_output(['wslpath', '-u', windows_stage], text=True).strip())
+
+    def run_fixture(self, fail=False, stage_failures=None):
         with tempfile.TemporaryDirectory(prefix='windows-bridge-test-') as directory:
             root = Path(directory)
-            for relative in ('App/changed.txt', 'external/promo/uncommitted.txt',
-                             'local.secrets.props', 'AppMSIX/App.pfx'):
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('working-tree')
-            (root / '.git').mkdir()
-            (root / '.git/private-metadata').write_text('not source')
-            (root / 'external/promo/.git').write_text('gitdir: absent')
-            (root / 'App/bin').mkdir()
-            (root / 'App/bin/stale.txt').write_text('stale')
-            (root / 'App/App.csproj').write_text('<Project />')
-            (root / 'AppMSIX/build-msix.ps1').write_text(PACKAGE_FIXTURE)
-            if fail:
-                (root / 'fail').touch()
-            (root / 'windows-build.json').write_text(json.dumps({
-                'project': 'App/App.csproj', 'package_script': 'AppMSIX/build-msix.ps1',
-                'package_output': 'AppMSIX/bin/msix-output', 'certificate': 'AppMSIX/App.pfx',
-            }))
-            result = subprocess.run(['python3', str(BRIDGE), '--repo', str(root)],
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.make_fixture_repo(root, fail)
+            result = self.run_bridge(root, stage_failures)
             output = next((root / '.artifacts/windows-build').iterdir())
             report = json.loads((output / 'result.json').read_text(encoding='utf-8-sig'))
             self.assertEqual(report['success'], not fail, result.stdout)
@@ -480,10 +586,8 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue((output / 'console.log').exists())
             self.assertFalse(list(output.rglob('*.pfx')))
             # Windows path is emitted once at startup, then that exact stage is removed.
-            line = next(line for line in result.stdout.splitlines() if line.startswith('Staging '))
-            windows_stage = line.split(' in ', 1)[1]
-            linux_stage = subprocess.check_output(['wslpath', '-u', windows_stage], text=True).strip()
-            self.assertFalse(Path(linux_stage).exists(), result.stdout)
+            windows_stage, linux_stage = self.staged_path(result)
+            self.assertFalse(linux_stage.exists(), result.stdout)
             self.assertEqual((root / 'App/changed.txt').read_text(), 'working-tree')
             self.assertEqual((root / 'App/bin/stale.txt').read_text(), 'stale')
             # Only a build that succeeded brings its named packages back.
@@ -496,6 +600,23 @@ class BridgeTests(unittest.TestCase):
 
     def test_failure_returns_logs_and_cleans_stage(self):
         self.run_fixture(fail=True)
+
+    def test_a_transient_enomem_on_cleanup_is_retried(self):
+        self.run_fixture(stage_failures=1)
+
+    def test_a_stage_that_cannot_be_deleted_keeps_the_builds_exit_code(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory(prefix='windows-bridge-test-') as directory:
+                root = Path(directory)
+                self.make_fixture_repo(root, fail)
+                result = self.run_bridge(root, stage_failures=-1)
+                _, linux_stage = self.staged_path(result)
+                try:
+                    self.assertEqual(result.returncode, 1 if fail else 0, result.stdout)
+                    self.assertIn('stage not removed (Cannot allocate memory)', result.stdout)
+                    self.assertTrue(linux_stage.exists())
+                finally:
+                    shutil.rmtree(linux_stage, ignore_errors=True)
 
     def test_concurrent_builds_use_different_stages(self):
         with ThreadPoolExecutor(max_workers=2) as executor:

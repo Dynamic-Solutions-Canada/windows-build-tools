@@ -13,6 +13,7 @@ import uuid
 
 import build_lock
 import host_platform
+import stage_cleanup
 import staged_packages
 
 EXCLUDED_DIRECTORIES = {
@@ -249,6 +250,9 @@ def main():
         raise RuntimeError('Windows TEMP must be on C:; refusing a different staging drive')
     stage_parent = temp_linux / 'WindowsAppBuilds'
     stage_parent.mkdir(exist_ok=True)
+    # Stages a failed cleanup left behind (see stage_cleanup.py) go once they are a day old.
+    for old_stage in stage_cleanup.prune_old_stages(stage_parent):
+        print(f'Removed old build stage: {old_stage}', flush=True)
     stage = Path(tempfile.mkdtemp(prefix=repo.name + '-', dir=stage_parent))
     build_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
     output = repo / '.artifacts' / 'windows-build' / build_id
@@ -327,7 +331,9 @@ def main():
                 # inputs if interruption prevented confirming that it completed.
                 cleanup_allowed = False
             if cleanup_allowed:
-                shutil.rmtree(stage)
+                # A stage that cannot be deleted is reported, never turned into a build failure:
+                # the exit code stays the build's own.
+                stage_cleanup.remove_stage(stage)
             else:
                 print(f'Build still running; stage preserved for recovery: {windows_path(stage)}', file=sys.stderr)
             print(f'Results: {output}', flush=True)
