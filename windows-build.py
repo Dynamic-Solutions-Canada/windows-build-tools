@@ -15,6 +15,7 @@ import build_lock
 import host_platform
 import stage_cleanup
 import staged_packages
+import vm_transport
 
 EXCLUDED_DIRECTORIES = {
     '.git', '.vs', '.crashdiag', 'bin', 'obj', 'node_modules',
@@ -119,6 +120,9 @@ def parse_arguments():
     parser.add_argument('--skip-build', action='store_true', help='Install the most recent successful dev package')
     parser.add_argument('--dry-run', action='store_true', help='Validate installation without changing Windows')
     parser.add_argument('--no-launch', action='store_true', help='Install without starting the app')
+    parser.add_argument('--vm', action='store_true',
+                        help='Build in the windows-dev VM even when this machine has host build tools '
+                             '(WINDOWS_BUILD_VM does the same); --build-only and --no-sign only')
     parser.add_argument('--no-wait', action='store_true',
                         help='Fail at once instead of queueing behind another run on the same Windows host')
     args = parser.parse_args()
@@ -218,13 +222,15 @@ def main():
     else:
         # Optional: only signed builds read it, and compile-only repos need not name one.
         certificate_source = repo / config['certificate'] if 'certificate' in config else None
+    # An explicit request for the VM (--vm or WINDOWS_BUILD_VM) wins over host build tools.
+    if vm_transport.forced_vm_host(args.vm):
+        return vm_transport.run(args, repo, config, snapshot_source, Path(__file__).parent)
     # Match the projects' GitHub Actions pwsh runtime. PowerShell 5.1's ANSI
     # defaults corrupt UTF-8 scripts and manifests even when source bytes match.
     powershell = shutil.which('pwsh.exe')
     if powershell is None:
-        # No host PowerShell 7: build in the local windows-dev VM when configured,
-        # otherwise fall back to the container-to-host SSH delegation.
-        import vm_transport
+        # No host PowerShell 7: build in a running windows-dev VM, otherwise fall back to the
+        # container-to-host SSH delegation.
         if vm_transport.vm_host():
             return vm_transport.run(args, repo, config, snapshot_source, Path(__file__).parent)
         return delegate_container()

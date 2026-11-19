@@ -51,6 +51,25 @@ def vm_host():
     return DEFAULT_VM if _vm_running() else None
 
 
+def forced_vm_host(requested):
+    """Return the VM's SSH destination when the caller forced the VM transport, else None.
+
+    requested: the bridge's --vm flag. Setting WINDOWS_BUILD_VM forces it too, even on a machine
+    with host build tools (pwsh.exe on the WSL path): a destination that was named but silently
+    ignored would build somewhere the caller did not ask for. --vm without WINDOWS_BUILD_VM needs
+    the windows-dev container running, and raises a RuntimeError saying how to start it.
+    """
+    host = vm_host()
+    if os.environ.get('WINDOWS_BUILD_VM'):
+        return host
+    if not requested:
+        return None
+    if host is None:
+        raise RuntimeError('--vm needs the windows-dev VM running (docker compose -f '
+                           '/development/windows-build-tools/vm/compose.yml up -d) or WINDOWS_BUILD_VM naming an SSH destination')
+    return host
+
+
 def _ssh(host, command, **kwargs):
     """Run one command in the VM. Windows OpenSSH hands it to cmd.exe."""
     return subprocess.run(['ssh', *SSH_OPTIONS, host, command], **kwargs)

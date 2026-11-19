@@ -18,6 +18,7 @@ import zipfile
 from unittest import mock
 import shutil
 import signal
+import sys
 
 import build_lock
 import host_platform
@@ -502,6 +503,49 @@ class StagedPackagesTests(unittest.TestCase):
 
                 self.assertEqual((repo / '.artifacts/packages/2.2.0/App-2.2.0-win-x64.msix').exists(), succeeded)
                 self.assertFalse((output / 'source').exists())
+
+
+class VmTransportChoiceTests(unittest.TestCase):
+    """--vm or WINDOWS_BUILD_VM chooses the VM transport, even with host build tools present."""
+
+    def choose(self, requested, env_vm=None, running=False):
+        """forced_vm_host(requested) with WINDOWS_BUILD_VM set to env_vm (None: unset) and the VM up or not."""
+        env = {key: value for key, value in os.environ.items() if key != 'WINDOWS_BUILD_VM'}
+        if env_vm:
+            env['WINDOWS_BUILD_VM'] = env_vm
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(vm_transport, '_vm_running', return_value=running):
+            return vm_transport.forced_vm_host(requested)
+
+    def test_the_environment_variable_forces_its_destination(self):
+        self.assertEqual(self.choose(False, env_vm='other-vm'), 'other-vm')
+
+    def test_the_flag_uses_the_running_windows_dev_vm(self):
+        self.assertEqual(self.choose(True, running=True), 'windows-dev')
+
+    def test_the_flag_without_a_vm_says_how_to_start_one(self):
+        with self.assertRaisesRegex(RuntimeError, '--vm needs the windows-dev VM running'):
+            self.choose(True)
+
+    def test_neither_leaves_the_usual_choice(self):
+        self.assertIsNone(self.choose(False, running=True))
+
+    def test_the_bridge_builds_in_the_vm_although_pwsh_is_on_the_path(self):
+        spec = importlib.util.spec_from_file_location('windows_build', BRIDGE)
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        with tempfile.TemporaryDirectory(prefix='windows-bridge-choice-') as directory:
+            repo = Path(directory)
+            (repo / 'Lib').mkdir()
+            (repo / 'Lib/Lib.csproj').write_text('<Project />')
+            (repo / 'windows-build.json').write_text(json.dumps({'project': 'Lib/Lib.csproj'}))
+            argv = ['windows-build.py', '--repo', str(repo), '--build-only']
+            with mock.patch.object(sys, 'argv', argv), \
+                    mock.patch.dict(os.environ, {'WINDOWS_BUILD_VM': 'windows-dev'}), \
+                    mock.patch.object(bridge.shutil, 'which', return_value='/mnt/c/pwsh.exe'), \
+                    mock.patch.object(bridge.vm_transport, 'run', return_value=0) as run:
+                self.assertEqual(bridge.main(), 0)
+            run.assert_called_once()
 
 
 class SnapshotSourceTests(unittest.TestCase):
