@@ -50,15 +50,27 @@ Write-Output ('dotnet SDKs: ' + ((& $dotnet --list-sdks) -join ', '))
 
 # Phase 4: Visual Studio Build Tools (current stable channel) for Release packaging.
 # The C++ workload's recommended components bring the Windows SDK (makeappx, makepri,
-# signtool); NativeAOT needs the MSVC linker, plus ARM64 tools for ARM64 packages.
+# signtool); NativeAOT needs the MSVC linker, plus ARM64 tools for ARM64 packages. The UWP
+# build tools build a package's UWP companion app, such as ChatMixr's Xbox Game Bar widget
+# (Game Bar hosts only UWP views); an existing install gets any of these it lacks.
 $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
-$haveVc = (Test-Path $vswhere) -and (& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath)
-if (-not $haveVc) {
+$components = @(
+    'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+    'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+    'Microsoft.VisualStudio.ComponentGroup.UWP.BuildTools')
+$haveAll = (Test-Path $vswhere) -and (& $vswhere -products * -requires $components -property installationPath)
+if (-not $haveAll) {
     $bootstrapper = Join-Path $env:TEMP 'vs_buildtools.exe'
     Invoke-WebRequest 'https://aka.ms/vs/stable/vs_buildtools.exe' -OutFile $bootstrapper
-    $arguments = @('--quiet', '--wait', '--norestart', '--nocache',
-        '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended',
-        '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64')
+    $existing = if (Test-Path $vswhere) { & $vswhere -products * -latest -property installationPath }
+    $adds = @('--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended',
+        '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+        '--add', 'Microsoft.VisualStudio.ComponentGroup.UWP.BuildTools')
+    $arguments = if ($existing) {
+        @('modify', '--installPath', "`"$existing`"") + $adds + @('--quiet', '--wait', '--norestart')
+    } else {
+        @('--quiet', '--wait', '--norestart', '--nocache') + $adds
+    }
     $install = Start-Process $bootstrapper -ArgumentList $arguments -Wait -PassThru
     # 3010 means success with a reboot pending.
     if ($install.ExitCode -notin 0, 3010) { throw "Build Tools installer exited with $($install.ExitCode)" }
