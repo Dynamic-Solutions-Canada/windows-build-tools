@@ -3,6 +3,22 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$Stage, [switch]$Interactive)
 $ErrorActionPreference = 'Stop'
+
+<# Processes running from a package's install folder (any of its executables). #>
+function Get-PackageProcess([string]$InstallLocation) {
+    $folder = $InstallLocation.TrimEnd('\') + '\'
+    Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($folder, [StringComparison]::OrdinalIgnoreCase) }
+}
+
+<# True once a process runs from the install folder, checking every half second for up to $Seconds. #>
+function Wait-PackageProcess([string]$InstallLocation, [int]$Seconds) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    do {
+        if (@(Get-PackageProcess $InstallLocation).Count -gt 0) { return $true }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
 $request = Get-Content (Join-Path $Stage 'request.json') -Raw | ConvertFrom-Json
 $packages = @(Get-ChildItem (Join-Path $Stage 'artifacts') -File | Where-Object { $_.Extension -in @('.msix', '.msixbundle') })
 if ($packages.Count -ne 1) { throw 'Installation requires exactly one MSIX.' }
@@ -115,6 +131,11 @@ try {
         $trust = Start-Process (Get-Process -Id $PID).Path -ArgumentList $arguments -Verb RunAs -Wait -PassThru
         if ($trust.ExitCode -ne 0) { throw 'Certificate trust was canceled or failed.' }
     }
+    # Windows restarts an app that registered for restart (RegisterApplicationRestart) once a forced
+    # update has closed it. Launching it as well, in the same second, fails in Windows with "the target
+    # host was not in a valid state to receive process registrations" (0x80070BF7), shown as an error box.
+    $previous = Get-AppxPackage -Name $identity.Name | Where-Object Publisher -eq $identity.Publisher
+    $wasRunning = $previous -and @(Get-PackageProcess $previous.InstallLocation).Count -gt 0
     Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown
     $installed = Get-AppxPackage -Name $identity.Name | Where-Object Publisher -eq $identity.Publisher
     if (-not $installed -or [version]$installed.Version -ne [version]$identity.Version) {
@@ -127,7 +148,11 @@ try {
         if (-not (@($manifest.Package.Applications.Application) | Where-Object Id -eq $appId)) {
             throw 'Configured launch entry point is absent from the manifest.'
         }
-        & explorer.exe "shell:AppsFolder\$($installed.PackageFamilyName)!$appId"
+        if ($wasRunning -and (Wait-PackageProcess $installed.InstallLocation 8)) {
+            Write-Host 'Windows restarted the app after the update; not launching it again.'
+        } else {
+            & explorer.exe "shell:AppsFolder\$($installed.PackageFamilyName)!$appId"
+        }
     }
     Write-Host "Installed $($installed.PackageFullName)"
 }

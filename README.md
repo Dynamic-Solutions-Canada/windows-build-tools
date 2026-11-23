@@ -83,6 +83,8 @@ check startup, tray/flyout behavior and the feature changed. ImmichDrive shell,
 thumbnail and Cloud Files behavior requires the installed MSIX. A successful
 compile does not establish runtime behavior.
 
+The install updates the package in place with `-ForceApplicationShutdown`, then launches the app. If the app was running and registered for restart (`RegisterApplicationRestart`), Windows restarts it after the update; the install then waits up to 8 seconds for that and does not launch it again, because a second launch in the same second fails with "the target host was not in a valid state to receive process registrations" (0x80070BF7). An app that was running but didn't register is launched after that wait.
+
 Run desktop commands from WSL in the signed-in Windows session. A Docker
 container can delegate the same commands over the existing Windows SSH host:
 mount the shared tools read-only, set `WINDOWS_BUILD_TOOLS` to that mount,
