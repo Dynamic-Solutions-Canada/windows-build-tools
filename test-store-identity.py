@@ -31,4 +31,12 @@ class StoreIdentityTests(unittest.TestCase):
             self.assertEqual(bridge.latest_dev_package(repo,'ARM64',True).name,'02-store')
             with self.assertRaises(FileNotFoundError): bridge.latest_dev_package(repo,'x64',True)
 
+    def test_store_identity_signs_with_its_publishers_key(self):
+        dynamic={'store_publisher':'CN=B55B96A5-F10C-49D3-8D0B-7260EDBE7625'}
+        self.assertEqual(bridge.shared_dev_key(dynamic,True),'dynamic-solutions-dev')
+        self.assertEqual(bridge.shared_dev_key(dynamic,False),'windows-apps-dev')
+        other={'store_publisher':'CN=C21E6CEF-D0D1-4497-93F9-3718D054DA0E'}
+        self.assertEqual(bridge.shared_dev_key(other,True),'windows-apps-dev')
+        self.assertEqual(bridge.shared_dev_key({'store_publisher':'CN=unknown'},True),'windows-apps-dev')
+
 if __name__=='__main__': unittest.main(verbosity=2)

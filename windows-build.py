@@ -61,23 +61,46 @@ def snapshot_source(repo, target):
                 raise RuntimeError(f'Source changed while being staged; retry: {source}')
 
 
-SHARED_DEV_PASSWORD_FILE = Path.home() / '.secrets' / 'windows-build-tools' / 'signing' / 'windows-apps-dev.password'
+SHARED_DEV_PASSWORD_DIR = Path.home() / '.secrets' / 'windows-build-tools' / 'signing'
+
+# The key every shared-dev build signs with under its dev identity.
+SHARED_DEV_KEY = 'windows-apps-dev'
+
+# A --store-identity build must be signed by a key whose subject is the Store publisher, so
+# each Partner Center publisher has its own self-signed dev key, named here.
+STORE_PUBLISHER_KEYS = {
+    'CN=C21E6CEF-D0D1-4497-93F9-3718D054DA0E': 'windows-apps-dev',
+    'CN=B55B96A5-F10C-49D3-8D0B-7260EDBE7625': 'dynamic-solutions-dev',
+}
 
 
-def read_shared_dev_password():
-    """Return the shared dev signing key's password from its private file (SEC-11).
+def shared_dev_key(config, store_identity):
+    """Return the name of the shared key a shared-dev build signs with.
+
+    Dev-identity builds always use SHARED_DEV_KEY. A Store-identity build uses the key made for
+    its Store publisher, or SHARED_DEV_KEY when none is listed (Windows then refuses the
+    mismatched publisher in build-staged.ps1, with its own message).
+    """
+    if store_identity:
+        return STORE_PUBLISHER_KEYS.get(config.get('store_publisher'), SHARED_DEV_KEY)
+    return SHARED_DEV_KEY
+
+
+def read_shared_dev_password(key=SHARED_DEV_KEY):
+    """Return a shared dev signing key's password from its private file (SEC-11).
 
     The password is never written in source. Raises FileNotFoundError naming the expected
     file, without echoing any value, when it is missing or empty.
     """
+    password_file = SHARED_DEV_PASSWORD_DIR / f'{key}.password'
     try:
-        password = SHARED_DEV_PASSWORD_FILE.read_text(encoding='utf-8').strip()
+        password = password_file.read_text(encoding='utf-8').strip()
     except FileNotFoundError:
         password = ''
     if not password:
         raise FileNotFoundError(
-            f'Shared dev signing password missing: create {SHARED_DEV_PASSWORD_FILE} '
-            '(mode 600, in a mode 700 directory) holding the password of signing/windows-apps-dev.pfx')
+            f'Shared dev signing password missing: create {password_file} '
+            f'(mode 600, in a mode 700 directory) holding the password of signing/{key}.pfx')
     return password
 
 
@@ -217,8 +240,9 @@ def main():
             if not config.get(key):
                 raise ValueError(f'--store-identity requires configured {key}')
         config['dev_identity'] = config['store_identity']
+    signing_key = shared_dev_key(config, args.store_identity)
     if config.get('signing') == 'shared-dev':
-        certificate_source = Path(__file__).with_name('signing') / 'windows-apps-dev.pfx'
+        certificate_source = Path(__file__).with_name('signing') / f'{signing_key}.pfx'
     else:
         # Optional: only signed builds read it, and compile-only repos need not name one.
         certificate_source = repo / config['certificate'] if 'certificate' in config else None
@@ -244,7 +268,7 @@ def main():
     # script on the WSL host, which owns ~/.secrets, and the VM transport never signs. Only a
     # fresh signed build opens the key, so compile-only, unsigned and --skip-build runs skip it.
     if config.get('signing') == 'shared-dev' and not (args.build_only or args.no_sign or args.skip_build):
-        config['certificate_password'] = read_shared_dev_password()
+        config['certificate_password'] = read_shared_dev_password(signing_key)
 
     # One build at a time per Windows host, across all sessions. Held until this process
     # exits; validation above runs first so a bad request fails without queueing.

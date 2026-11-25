@@ -231,7 +231,14 @@ Projects that configure `store_identity`, `store_publisher`, and `store_identity
 can opt into `npm run install:desktop -- --store-identity`. This signs a local test
 package with the existing Store name and publisher, allocates its revision against that
 installed family, and updates in place. The signing certificate must match the Store
-publisher. Package data stays with the same family; no uninstall is performed. Store
+publisher, so each Partner Center publisher has its own self-signed key in `signing/`,
+listed in `STORE_PUBLISHER_KEYS` in `windows-build.py`: `windows-apps-dev.pfx` for
+`CN=C21E6CEF-D0D1-4497-93F9-3718D054DA0E`, and `dynamic-solutions-dev.pfx` for
+`CN=B55B96A5-F10C-49D3-8D0B-7260EDBE7625` (ChatMixr, DisplaySwitchr, Tray Control for WSL;
+thumbprint `FF22AEBB4FEC5716E6544EA5F6A6D3C00047E9B6`, expires 2029-11-24). Each key's
+password is `~/.secrets/windows-build-tools/signing/<key>.password`; the same rules as the
+shared key apply. Dev-identity builds always sign with `windows-apps-dev.pfx`. The first
+install signed by a new key asks Windows for consent to trust its public certificate. Package data stays with the same family; no uninstall is performed. Store
 updates resume when a higher version becomes available. This is local testing, not a
 Store submission. Other projects and default dev builds keep their existing identities.
 `--skip-build` selects only packages built for the requested identity mode.
