@@ -37,8 +37,8 @@ guest_build() {
 }
 
 # Phase 1: confirm the guest is up and still needs the update.
-[[ "$(docker inspect -f '{{.State.Running}}' "$APP_TEST_CONTAINER" 2>/dev/null)" == true ]] ||
-    { echo "win10-update: start it first: docker compose -f vm/compose.win10.yml up -d" >&2; exit 1; }
+[[ "$(_app_test_docker inspect -f '{{.State.Running}}' "$APP_TEST_CONTAINER" 2>/dev/null)" == true ]] ||
+    { echo "win10-update: start it first: docker compose -f vm/compose.win10.yml up -d (or vm/remote.sh up win10 once it lives on the home server)" >&2; exit 1; }
 app_test_wait 15
 before=$(guest_build)
 if (( ${before#*.} >= TARGET_UBR )) && [[ "${before%%.*}" == "$TARGET_BUILD" ]]; then

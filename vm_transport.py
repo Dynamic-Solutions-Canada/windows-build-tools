@@ -1,4 +1,4 @@
-"""Run a bridge build inside the local windows-dev VM over key-only SSH.
+"""Run a bridge build inside the windows-dev VM over key-only SSH.
 
 The VM has no view of the WSL checkout, so this transport snapshots the source on
 the Linux side, streams it into the VM user's TEMP/WindowsAppBuilds, runs the same
@@ -26,16 +26,34 @@ RETURNED_FILES = ('build.log', 'console.log', 'result.json')
 
 
 DEFAULT_VM = 'windows-dev'
+# Where windows-dev normally runs: the home server's Docker, reached over SSH (vm/remote.sh). The
+# local Docker is the fallback, and is checked first so a local VM always wins.
+REMOTE_DOCKER_HOST = os.environ.get('WINDOWS_VM_DOCKER_HOST', 'ssh://home')
 
 
-def _vm_running():
-    """True when the windows-dev container is up; any Docker failure counts as not running."""
+def _container_running(docker_host):
+    """True when windows-dev is up in the given Docker (None: this machine's own).
+
+    Any Docker or SSH failure, or no answer within 10 seconds, counts as not running.
+    """
+    env = dict(os.environ)
+    if docker_host:
+        env['DOCKER_HOST'] = docker_host
     try:
         state = subprocess.run(['docker', 'inspect', '-f', '{{.State.Running}}', DEFAULT_VM],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return state.returncode == 0 and state.stdout.strip() == 'true'
+
+
+def _vm_running():
+    """True when the windows-dev container is up locally or on the home server.
+
+    The remote VM is reached through vm/remote.sh's SSH tunnel on the same loopback port as the
+    local one, so the SSH destination is the same either way.
+    """
+    return _container_running(None) or _container_running(REMOTE_DOCKER_HOST)
 
 
 def vm_host():
@@ -65,8 +83,8 @@ def forced_vm_host(requested):
     if not requested:
         return None
     if host is None:
-        raise RuntimeError('--vm needs the windows-dev VM running (docker compose -f '
-                           '/development/windows-build-tools/vm/compose.yml up -d) or WINDOWS_BUILD_VM naming an SSH destination')
+        raise RuntimeError('--vm needs the windows-dev VM running (/development/windows-build-tools/vm/remote.sh up) '
+                           'or WINDOWS_BUILD_VM naming an SSH destination')
     return host
 
 

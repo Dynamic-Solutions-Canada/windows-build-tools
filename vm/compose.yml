@@ -1,5 +1,6 @@
-# Local Windows 11 build VM for the shared bridge, run under WSL's nested KVM.
-# Start on demand and stop after builds so its RAM returns to WSL:
+# Windows 11 build VM for the shared bridge. It normally runs on the home server, started on demand
+# and stopped after builds with vm/remote.sh up|down, which sets the storage, OEM and RDP port below.
+# Local fallback under WSL's nested KVM (stop vm/remote.sh first; both use the same local ports):
 #   docker compose -f /development/windows-build-tools/vm/compose.yml up -d
 #   docker compose -f /development/windows-build-tools/vm/compose.yml stop
 # Credentials live outside version control in ~/.secrets/windows-build-tools/windows-dev/.
@@ -17,9 +18,9 @@ services:
       # container's local time. oem/guest-clock.ps1 sets the guest to the matching Eastern time
       # zone; without both, a UTC container and the image's default Pacific guest boot 8 hours ahead.
       TZ: "America/Toronto"
-      # WSL shares about 15 GiB with Paseo and its agents. 4G guest under a 5G hard
-      # container cap keeps the machine's 4 GiB safety margin; raise both together
-      # only after WSL's own memory limit is increased.
+      # The home server shares its memory with its own services, and WSL (the fallback) with
+      # Paseo and its agents. 4G guest under a 5G hard container cap; raise both together
+      # only when both hosts have room. vm/remote.sh checks the server's free memory first.
       RAM_SIZE: "4G"
       CPU_CORES: "4"
       DISK_SIZE: "128G"
@@ -30,14 +31,15 @@ services:
       - /dev/net/tun
     cap_add:
       - NET_ADMIN
-    # Loopback only: nothing is exposed beyond this machine.
+    # Loopback only: nothing is exposed beyond the host it runs on.
     ports:
       - 127.0.0.1:8006:8006
-      - 127.0.0.1:3389:3389/tcp
-      - 127.0.0.1:3389:3389/udp
+      - 127.0.0.1:${WINDOWS_VM_RDP_PORT:-3389}:3389/tcp
+      - 127.0.0.1:${WINDOWS_VM_RDP_PORT:-3389}:3389/udp
       - 127.0.0.1:2229:22
     volumes:
-      - ${HOME}/.local/share/windows-dev/storage:/storage
-      - ./oem:/oem:ro
+      # vm/remote.sh points these at the home server; unset, they are this machine's (the fallback).
+      - ${WINDOWS_VM_STORAGE:-${HOME}/.local/share/windows-dev/storage}:/storage
+      - ${WINDOWS_VM_OEM:-./oem}:/oem:ro
     restart: "no"
     stop_grace_period: 2m

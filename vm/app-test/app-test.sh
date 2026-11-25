@@ -305,21 +305,32 @@ _app_test_lock_holder() {
 
 _app_test_lock_file() { echo "${XDG_CACHE_HOME:-$HOME/.cache}/windows-build-tools/vm-windows-dev.lock"; }
 
+# Run docker against wherever $APP_TEST_CONTAINER runs: this machine's Docker when the local fallback
+# container is up, otherwise the home server's (WINDOWS_VM_DOCKER_HOST, default ssh://home), where
+# vm/remote.sh starts it. SSH reaches either through the same loopback port.
+_app_test_docker() {
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$APP_TEST_CONTAINER" 2>/dev/null)" == true ]]; then
+        docker "$@"
+    else
+        DOCKER_HOST="${WINDOWS_VM_DOCKER_HOST:-ssh://home}" docker "$@"
+    fi
+}
+
 # Whole-screen capture from QEMU (works even with no session script running). Converts the monitor's
 # PPM to PNG with the Python standard library.
 app_test_screendump() {
     local out="$1" tmp
     tmp=$(mktemp -d)
-    printf 'screendump /tmp/app-test.ppm\n' | docker exec -i "$APP_TEST_CONTAINER" sh -c 'nc -q1 -U /run/shm/monitor.sock' >/dev/null 2>&1
+    printf 'screendump /tmp/app-test.ppm\n' | _app_test_docker exec -i "$APP_TEST_CONTAINER" sh -c 'nc -q1 -U /run/shm/monitor.sock' >/dev/null 2>&1
     # The monitor writes the file asynchronously; wait until its size stops changing.
     local size=-1 now
     for _ in $(seq 1 20); do
         sleep 0.5
-        now=$(docker exec "$APP_TEST_CONTAINER" stat -c %s /tmp/app-test.ppm 2>/dev/null || echo 0)
+        now=$(_app_test_docker exec "$APP_TEST_CONTAINER" stat -c %s /tmp/app-test.ppm 2>/dev/null || echo 0)
         [[ "$now" -gt 0 && "$now" == "$size" ]] && break
         size=$now
     done
-    docker cp "$APP_TEST_CONTAINER:/tmp/app-test.ppm" "$tmp/s.ppm" >/dev/null
+    _app_test_docker cp "$APP_TEST_CONTAINER:/tmp/app-test.ppm" "$tmp/s.ppm" >/dev/null
     python3 -I - "$tmp/s.ppm" "$out" <<'PY'
 import struct, sys, zlib
 data = open(sys.argv[1], "rb").read()

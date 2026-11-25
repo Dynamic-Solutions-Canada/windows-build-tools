@@ -108,9 +108,28 @@ the matching guide when performing that task. These are repository task guides, 
 automatically registered slash commands. Follow project release guides for releases,
 and leave changes uncommitted unless a commit is explicitly requested.
 
-## Local windows-dev VM (when this PC has no Windows build tools)
+## windows-dev VM (when this PC has no Windows build tools)
 
-`vm/compose.yml` runs a Windows 11 guest (`dockurr/windows`, pinned) under WSL's nested KVM. It starts on demand and should be stopped after builds so its memory returns to WSL. Its ports bind to loopback only: web console `http://127.0.0.1:8006`, RDP `127.0.0.1:3389` and SSH `127.0.0.1:2229` (key-only, alias `windows-dev` in `~/.ssh/config`). The disk lives in `~/.local/share/windows-dev/storage`; the guest's local account password is in `~/.secrets/windows-build-tools/windows-dev/vm.env`, outside version control. Windows is installed unactivated, which is enough for building.
+`vm/compose.yml` runs a Windows 11 guest (`dockurr/windows`, pinned) under KVM. It normally runs on the home server (ssh alias `home`), not in WSL, so its memory and CPU stay off this machine. It starts on demand and is stopped after use, since the server's memory also runs its own services. Its ports bind to loopback only, on the server, and `vm/remote.sh` opens an SSH tunnel so WSL sees the same addresses as before: web console `http://127.0.0.1:8006`, RDP `127.0.0.1:3389` and SSH `127.0.0.1:2229` (key-only, alias `windows-dev` in `~/.ssh/config`). The build bridge and `vm/app-test` need no setting: they find the container locally or on the server and connect to the same loopback port. The guest's local account password is in `~/.secrets/windows-build-tools/windows-dev/vm.env`, outside version control; Compose reads it on WSL and passes it to the container, so the server keeps no copy on disk. Windows is installed unactivated, which is enough for building.
+
+```bash
+vm/remote.sh up        # refuses if another Windows VM runs on the server, or memory or disk is short
+npm run verify:desktop
+vm/remote.sh down      # clean guest shutdown, then the tunnel closes
+vm/remote.sh status    # where it runs, the server's free memory and disk, and the tunnel
+```
+
+On the server, the disk is in `/servers/windows-dev/storage` and the OEM scripts in `/servers/windows-dev/oem` (`up` copies `vm/oem` there each time). `up` checks that no other Windows VM runs there (one at a time), that the server keeps at least 1.5 GB of memory available beyond the VM's cap, that its root disk has room for the guest's sparse disk to grow, and that the disk image has been copied there, since an empty storage folder would make the image install a fresh Windows. The server's own xrdp holds port 3389, so the VM's RDP is published at `127.0.0.1:13389` there and the tunnel maps it back to 3389. While the VM runs, `vm/disk-watchdog.sh` runs beside it on the server, started by `up` and stopped by `down`. The guest's disk image is sparse and can grow to its full 128 GB on the same root disk as Home Assistant and the server's other services, which had about 30 GB free when the VM moved. Every minute the watchdog checks free space on `/`: below 8 GB it logs a warning, and below 5 GB it shuts Windows down cleanly (the same two-minute shutdown as `down`). The tunnel ends by itself whenever the container stops, so it never points at a stopped VM. `vm/remote.sh status` shows whether the watchdog runs and the last lines of its log, `/servers/windows-dev/watchdog.log`. Swap on the server is fully used, so its free memory is the `available` column of `free -m` (the kernel's MemAvailable), never `free` plus swap; `up` checks that figure. For the QEMU monitor and other recovery steps in a guest on the server, prefix the usual `docker` commands with `DOCKER_HOST=ssh://home`. Settings: `WINDOWS_VM_SSH_HOST` and `WINDOWS_VM_DOCKER_HOST` name another server.
+
+### Local fallback
+
+The same compose file still runs the VM in WSL, from its previous disk in `~/.local/share/windows-dev/storage`. That disk is a copy as of November 25, 2026, the day the VM moved, and no longer receives changes made on the server; copy the server's disk back with `rsync -S` before relying on it. The local container and the tunnel use the same local ports, so only one of them can be in use: run `vm/remote.sh down` before the local `up`, and stop the local container before `vm/remote.sh up` (which refuses while it runs).
+
+```bash
+docker compose -f /development/windows-build-tools/vm/compose.yml up -d
+npm run verify:desktop
+docker compose -f /development/windows-build-tools/vm/compose.yml stop
+```
 
 Before the first `up`, write the guest's SSH key list from your own public key. It is git-ignored, and the comment field (user@host) is dropped so nothing personal is copied into the guest:
 
@@ -120,13 +139,7 @@ cut -d' ' -f1,2 ~/.ssh/id_ed25519.pub > /development/windows-build-tools/vm/oem/
 
 The unattended install copies it into the guest once; `vm/oem/administrators_authorized_keys.example` shows the format.
 
-```bash
-docker compose -f /development/windows-build-tools/vm/compose.yml up -d
-npm run verify:desktop
-docker compose -f /development/windows-build-tools/vm/compose.yml stop
-```
-
-When `pwsh.exe` is not on the WSL path and the `windows-dev` container is running, or whenever the build is asked for the VM explicitly, `vm_transport.py` snapshots the source here, streams it into the guest user's `%TEMP%\WindowsAppBuilds`, runs the same `build-staged.ps1`, copies logs and artifacts back to `.artifacts/windows-build/<build-id>/`, then removes the guest stage. The guest toolchain (PowerShell 7, the .NET SDK band from `global.json`, Visual Studio Build Tools with the C++ workload, ARM64 tools, the UWP build tools and the Windows SDK) is installed by the re-runnable `vm/guest-toolchain.ps1`; see its header for the two commands. To build in the VM on a machine that also has host build tools, pass `--vm` (the `windows-dev` container must be running) or set `WINDOWS_BUILD_VM` to the guest's SSH destination; either one overrides the host tools. It supports `--build-only` and `--no-sign` only: signed builds and installs would need the private dev signing key inside the guest, which is not authorized. The guest is a 4 GiB VM under a 5 GiB hard container cap, sized for WSL's shared memory; raise both together only after WSL's own limit is increased.
+When `pwsh.exe` is not on the WSL path and the `windows-dev` container is running, or whenever the build is asked for the VM explicitly, `vm_transport.py` snapshots the source here, streams it into the guest user's `%TEMP%\WindowsAppBuilds`, runs the same `build-staged.ps1`, copies logs and artifacts back to `.artifacts/windows-build/<build-id>/`, then removes the guest stage. The guest toolchain (PowerShell 7, the .NET SDK band from `global.json`, Visual Studio Build Tools with the C++ workload, ARM64 tools, the UWP build tools and the Windows SDK) is installed by the re-runnable `vm/guest-toolchain.ps1`; see its header for the two commands. To build in the VM on a machine that also has host build tools, pass `--vm` (the `windows-dev` container must be running) or set `WINDOWS_BUILD_VM` to the guest's SSH destination; either one overrides the host tools. It supports `--build-only` and `--no-sign` only: signed builds and installs would need the private dev signing key inside the guest, which is not authorized. The guest is a 4 GiB VM under a 5 GiB hard container cap, sized for the memory the home server (and WSL, for the fallback) can spare; raise both together only when both have room.
 
 Both VMs keep Toronto time. The image starts QEMU with `-rtc base=localtime`, so the guest's hardware clock holds the container's local time and Windows reads it as its own local time. The compose files therefore set `TZ=America/Toronto`, and `vm/oem/guest-clock.ps1` sets the guest to the matching Eastern time zone; with a UTC container and the image's default Pacific guest, both VMs booted 8 hours ahead. The script also registers a "Clock resync" task that resyncs Windows Time at every boot, logging to `C:\OEM\clock-resync.log`. Fresh installs run it from `oem/install.bat`; for a guest installed before that, recreate the container with `up -d` (which picks up the new `TZ`), then run `app_test_clock` from `vm/app-test/app-test.sh` once per guest.
 
@@ -139,7 +152,7 @@ docker compose -f vm/compose.win10.yml up -d
 docker compose -f vm/compose.win10.yml stop
 ```
 
-The guest gets 3 GB under a 3.5 GB container cap, so check `free -m` first and leave the usual safety margin. Never run it alongside `windows-dev` or the Android VM. The first start downloads Windows 10 from Microsoft and installs it unattended, which takes a while; later starts boot the existing disk. Windows is installed unactivated, which is enough for testing.
+The guest gets 3 GB under a 3.5 GB container cap, so check `free -m` first and leave the usual safety margin. Never run it alongside `windows-dev` or the Android VM. It still runs in WSL: the home server's disk has no room for its 22 GB disk beside `windows-dev`'s, so `vm/remote.sh ... win10` refuses until its disk is copied to `/servers/windows10-test/storage` there. The first start downloads Windows 10 from Microsoft and installs it unattended, which takes a while; later starts boot the existing disk. Windows is installed unactivated, which is enough for testing.
 
 The install media is from May 2023 (build 19045.2965), older than any patched user's PC, and .NET 9 and later apps fail to start there ("Your Windows doesn't fully support CET"). After the first install, and after recreating the disk, run `vm/win10-update.sh` with the VM running and nothing else using it. It installs KB5066791, the last public Windows 10 update (October 2025, build 19045.6456), checked against Microsoft's catalog digest, and reports the build it reached. That is the oldest build a patched user can have; later updates need a paid Extended Security Updates licence this guest cannot have. It takes about an hour, and does nothing once the guest is up to date.
 
@@ -161,7 +174,7 @@ The install media is from May 2023 (build 19045.2965), older than any patched us
 source vm/app-test/app-test.sh
 app_test_use win11
 app_test_lock
-docker compose -f vm/compose.yml up -d
+vm/remote.sh up                            # or the local fallback: docker compose -f vm/compose.yml up -d
 app_test_wait 10
 app_test_effects                           # once per guest; restarts it the first time
 for f in vm/app-test/*.ps1 drive.ps1 App-1.2.3.4-x64.msix; do app_test_put "$f"; done
@@ -171,7 +184,7 @@ app_test_run "& C:\apptest\screenshot-desktop.ps1 -Mode Prepare"   # for store o
 app_test_ui 'C:\apptest\drive.ps1'
 app_test_get 'out/*.png' ./shots/
 app_test_clean                             # restores the desktop, removes packages and C:\apptest
-docker compose -f vm/compose.yml stop
+vm/remote.sh down                          # or: docker compose -f vm/compose.yml stop
 app_test_unlock
 ```
 

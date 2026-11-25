@@ -39,11 +39,12 @@ services:
     # Loopback only, on ports beside the build VM's so both configurations can exist.
     ports:
       - 127.0.0.1:8007:8006
-      - 127.0.0.1:3390:3389/tcp
-      - 127.0.0.1:3390:3389/udp
+      - 127.0.0.1:${WINDOWS_VM_RDP_PORT:-3390}:3389/tcp
+      - 127.0.0.1:${WINDOWS_VM_RDP_PORT:-3390}:3389/udp
       - 127.0.0.1:2230:22
     volumes:
-      - ${HOME}/.local/share/windows10-test/storage:/storage
-      - ./oem:/oem:ro
+      # vm/remote.sh points these at the home server; unset, they are this machine's (the fallback).
+      - ${WINDOWS_VM_STORAGE:-${HOME}/.local/share/windows10-test/storage}:/storage
+      - ${WINDOWS_VM_OEM:-./oem}:/oem:ro
     restart: "no"
     stop_grace_period: 2m
