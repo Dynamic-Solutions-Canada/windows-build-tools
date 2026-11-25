@@ -1,9 +1,12 @@
-# Local Windows 10 22H2 test VM, run under WSL's nested KVM. For installing and exercising apps
-# whose minimum is Windows 10 22H2 (build 19045), not for building: builds use compose.yml.
-# Start on demand and stop afterwards so its RAM returns to WSL (from the repo root):
-#   docker compose -f vm/compose.win10.yml up -d
+# Windows 10 22H2 test VM. For installing and exercising apps whose minimum is Windows 10 22H2
+# (build 19045), not for building: builds use compose.yml. It normally runs on the home server;
+# vm/remote.sh sets the storage, OEM and RDP port below. Start on demand and stop afterwards
+# (from the repo root):
+#   vm/remote.sh up win10      # normally, on the home server
+#   vm/remote.sh down win10
+#   docker compose -f vm/compose.win10.yml up -d    # local fallback under WSL's nested KVM
 #   docker compose -f vm/compose.win10.yml stop
-# Never run it alongside the Windows 11 build VM or the Android VM.
+# Never run it alongside the Windows 11 build VM (on the same host) or the Android VM.
 # Shares the build VM's guest password and SSH key list (outside version control).
 name: windows10-test
 services:
@@ -21,7 +24,8 @@ services:
       # zone; without both, a UTC container and the image's default Pacific guest boot 8 hours ahead.
       TZ: "America/Toronto"
       # Smaller than the build VM: it only runs the app under test. A 3G guest under a 3.5G hard
-      # cap keeps WSL's 2.5 GiB safety margin when about 6 GiB is free; check `free -m` first.
+      # cap; vm/remote.sh checks the server's free memory, and for the local fallback check
+      # `free -m` first and keep WSL's 2.5 GiB safety margin.
       RAM_SIZE: "3G"
       # The image's own RAM check measures free memory inside the container, where file cache from
       # the ISO download counts as used; after the first download it shrank the guest to 54 MB and

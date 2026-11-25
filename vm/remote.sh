@@ -210,6 +210,9 @@ cmd_up() {
 
     check_can_start
     sync_server_files
+    # A watchdog from the last run may still be sleeping before it notices that run's stop; replace
+    # it, or it could exit after counting as this run's watchdog.
+    stop_watchdog
     server_compose up -d
     start_watchdog
     open_tunnel
