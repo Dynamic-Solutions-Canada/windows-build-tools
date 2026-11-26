@@ -102,7 +102,10 @@ the running system's own temporary files, and the next run gets them.
 #>
 function Clear-Folder([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
+        # Keep the folder's own desktop.ini: it gives a known folder such as Downloads its name in
+        # the display language, and without it Explorer shows "Downloads" in every language.
         Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'desktop.ini' } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         Write-Output "cleared $Path"
     }
