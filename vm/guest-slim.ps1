@@ -23,6 +23,9 @@
 # Safe to re-run. It keeps everything the bridge build and vm/app-test use: the build toolchain
 # (guest-toolchain.ps1), MSIX installs (App Installer, Store and its purchase app), WebView2 and Edge,
 # the Windows App Runtime and other frameworks, Notepad, Calculator and Terminal (used in captures),
+# Paint, Clock and Clipchamp (Little Launcher's Store screenshots show their icons; restored on
+# windows-dev with winget from the Store on November 26, 2026, which grew its disk image by about
+# 0.75 GB after a trim),
 # Snipping Tool (Repilot's "Screen snip" function opens it), Photos (Immich Drive's tests open photos
 # from File Explorer), media extensions, Widgets (Persistent's widget, Repilot's Win+W), and Xbox
 # Game Bar with the packages it needs (ChatMixr's widget, Repilot's Win+G, gamebar.ps1). It removes
@@ -48,7 +51,6 @@ $ProgressPreference = 'SilentlyContinue'
 
 # Consumer apps a build or test guest never uses. Names missing on a given Windows version are skipped.
 $RemovableApps = @(
-    'Clipchamp.Clipchamp'
     'Microsoft.BingNews'
     'Microsoft.BingSearch'
     'Microsoft.BingWeather'
@@ -64,15 +66,13 @@ $RemovableApps = @(
     'Microsoft.Office.OneNote'
     'Microsoft.OneDrive.Photos'
     'Microsoft.OutlookForWindows'
-    'Microsoft.Paint'
-    'Microsoft.MSPaint'
+    'Microsoft.MSPaint'                   # Paint 3D; the current Paint (Microsoft.Paint) is kept
     'Microsoft.People'
     'Microsoft.PowerAutomateDesktop'
     'Microsoft.SkypeApp'
     'Microsoft.Todos'
     'Microsoft.Wallet'
     'Microsoft.Windows.DevHome'
-    'Microsoft.WindowsAlarms'
     'Microsoft.WindowsCamera'
     'microsoft.windowscommunicationsapps'
     'Microsoft.WindowsFeedbackHub'
