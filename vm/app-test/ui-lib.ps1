@@ -92,6 +92,7 @@ public static class UiNative {
   public struct HIGHCONTRAST { public int cbSize; public int dwFlags; public string lpszDefaultScheme; }
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern bool SystemParametersInfo(int action, int param, ref HIGHCONTRAST hc, int winIni);
+  [DllImport("kernel32.dll")] public static extern ushort GetUserDefaultUILanguage();
 }
 "@
 # Per-monitor aware (v2), so every coordinate this script reads or sets is in physical pixels at any
@@ -104,6 +105,15 @@ if (-not [UiNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {   # DPI_AWAR
 $UiA = [System.Windows.Automation.AutomationElement]
 $UiRoot = $UiA::RootElement
 $UiOut = "C:\apptest\out"
+
+<#
+The signed-in user's Windows display language as a culture name, such as "ja-JP". Use it instead of
+Get-UICulture: these scripts run in a console host, and for Chinese, Japanese and Korean Windows gives
+a console thread English as its UI language, so Get-UICulture reports en-US there.
+#>
+function Get-DisplayLanguage {
+    [Globalization.CultureInfo]::GetCultureInfo([int][UiNative]::GetUserDefaultUILanguage()).Name
+}
 
 <# Turn Windows high contrast on (with the given scheme) or off, for the whole guest session. #>
 function Set-HighContrast([bool]$On, [string]$Scheme = "High Contrast Black") {
