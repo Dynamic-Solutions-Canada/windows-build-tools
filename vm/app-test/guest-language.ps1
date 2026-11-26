@@ -90,7 +90,7 @@ if ($installed -notcontains $Language) {
     throw "The $Language language pack is not installed (installed: $($installed -join ', ')); install it first: Install-Language $Language -ExcludeFeatures"
 }
 
-# The language list: this language alone, with one keyboard, so no input indicator shows.
+# The language list: this language alone, with one keyboard, so Windows shows no language switcher.
 $list = New-WinUserLanguageList $Language
 $tip = if ($Keyboard) { $Keyboard } elseif ($PlainKeyboards.ContainsKey($Language)) { $PlainKeyboards[$Language] } else { $null }
 if ($tip) {

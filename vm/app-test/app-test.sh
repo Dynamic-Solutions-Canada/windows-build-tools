@@ -162,7 +162,7 @@ app_test_clock() {
     app_test_ps 'C:\OEM\guest-clock.ps1'
 }
 
-# Switch the guest user's display language, input language (one plain keyboard), home location and
+# Switch the guest user's display language, input language (one keyboard), home location and
 # regional format as a set (vm/app-test/guest-language.ps1, which documents each), or back with en-US;
 # with no argument, print the current settings. The pack must be installed. Windows applies the
 # display language at the next sign-in, so afterwards cold-cycle the guest on its base disk
