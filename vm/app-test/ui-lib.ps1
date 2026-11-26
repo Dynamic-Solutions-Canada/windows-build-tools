@@ -353,7 +353,46 @@ function Save-DesktopCapture([string]$Name, $Window) {
     }
     # UTF-8 without a byte order mark, which Set-Content in Windows PowerShell 5.1 would add.
     [IO.File]::WriteAllText("$UiOut\$Name.json", ($sidecar | ConvertTo-Json -Depth 3), (New-Object Text.UTF8Encoding $false))
+    Save-ElementDump $Name $Window
     Write-Output "capture: $Name.png, $Name.json"
+}
+
+<#
+Write $UiOut\<Name>.uia.json beside a capture: every element of the window that has a name, with its
+control type, automation ID, name and bounding rectangle in physical pixels, in tree order. Automated
+localization checks compare these between languages (English left over, text that no longer fits,
+layout changes) without reading pixels. Never fails the capture: an error is recorded in the file.
+#>
+function Save-ElementDump([string]$Name, $Window) {
+    $elements = New-Object System.Collections.ArrayList
+    $errorText = $null
+    try {
+        $all = $Window.FindAll('Descendants', [System.Windows.Automation.Condition]::TrueCondition)
+        foreach ($element in $all) {
+            $current = $element.Current
+            if ([string]::IsNullOrWhiteSpace($current.Name)) { continue }
+            $r = $current.BoundingRectangle
+            $rect = $null
+            if (-not $r.IsEmpty) { $rect = [ordered]@{ x = [int]$r.X; y = [int]$r.Y; width = [int]$r.Width; height = [int]$r.Height } }
+            $entry = [ordered]@{
+                type = $current.ControlType.ProgrammaticName -replace '^ControlType\.', ''
+                id = $current.AutomationId
+                name = $current.Name
+                rect = $rect
+                offscreen = $current.IsOffscreen
+            }
+            [void]$elements.Add($entry)
+        }
+    } catch {
+        $errorText = "$_"
+    }
+    $frame = Get-WindowFrame $Window
+    $dump = [ordered]@{
+        window = [ordered]@{ x = $frame.X; y = $frame.Y; width = $frame.Width; height = $frame.Height }
+        elements = $elements
+        error = $errorText
+    }
+    [IO.File]::WriteAllText("$UiOut\$Name.uia.json", ($dump | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
 }
 
 <#
