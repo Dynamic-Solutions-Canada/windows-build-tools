@@ -152,7 +152,9 @@ $Settings = @(
     @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'; Name = 'EnableTransparency'; Value = 1 }
     @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'; Name = 'SearchboxTaskbarMode'; Value = 0 }
     # App notifications (toasts) off for the session ("Notifications" in Settings), so a late toast,
-    # such as Windows' own pin request, cannot appear in a capture.
+    # such as Windows' own pin request, cannot appear in a capture. With them off, Windows also refuses
+    # taskbar pin requests (TaskbarManager.IsPinningAllowed is false), so a capture that needs the pin
+    # prompt turns ToastEnabled on around it and restarts WpnUserService_* (Little Launcher's does).
     @{ Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'ToastEnabled'; Value = 0 }
     # The documented "Allow widgets" policy; the per-user TaskbarDa value is write-protected (UCPD).
     @{ Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'; Name = 'AllowNewsAndInterests'; Value = 0 }
