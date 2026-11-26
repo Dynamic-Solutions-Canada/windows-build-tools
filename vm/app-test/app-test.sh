@@ -11,6 +11,7 @@
 #   app_test_screendump ./shots/full.png   # whole guest screen through the QEMU monitor
 #   app_test_effects                       # windows-dev only: rounded corners, shadows and Mica
 #   app_test_clock                         # Toronto time zone and a clock resync at every boot
+#   app_test_language de-DE                # windows-dev only: display, input, home location and format; en-US restores
 #   app_test_clean                         # undo the session and remove C:\apptest, whoever left it
 # Scripts that drive UI dot-source C:\apptest\ui-lib.ps1 and save shots in C:\apptest\out.
 #
@@ -159,6 +160,31 @@ app_test_clock() {
     script="$(dirname "${BASH_SOURCE[0]}")/../oem/guest-clock.ps1"
     _app_test_copy "$script" 'C:/OEM/guest-clock.ps1' || return 1
     app_test_ps 'C:\OEM\guest-clock.ps1'
+}
+
+# Switch the guest user's display language, input language (one plain keyboard), home location and
+# regional format as a set (vm/app-test/guest-language.ps1, which documents each), or back with en-US;
+# with no argument, print the current settings. The pack must be installed. Windows applies the
+# display language at the next sign-in, so afterwards cold-cycle the guest on its base disk
+# (vm/remote.sh down, then up). A -snapshot session would lose the change with its overlay, so switch
+# before starting one. Needs app_test_lock, since it changes the shared build VM.
+app_test_language() {
+    local script
+    script="$(dirname "${BASH_SOURCE[0]}")/guest-language.ps1"
+    if [[ "$APP_TEST_CONTAINER" != windows-dev ]]; then
+        echo "app_test_language: windows-dev only (app_test_use win11); only it has the language packs" >&2
+        return 1
+    fi
+    _app_test_copy "$script" 'C:/OEM/guest-language.ps1' || return 1
+    if [[ -z "${1:-}" ]]; then
+        app_test_ps 'C:\OEM\guest-language.ps1' -Show
+        return
+    fi
+    if [[ -z "$(_app_test_lock_holder)" ]]; then
+        echo "app_test_language: this changes windows-dev for every later run; take app_test_lock first" >&2
+        return 1
+    fi
+    app_test_ps 'C:\OEM\guest-language.ps1' -Language "$1"
 }
 
 # Restart the guest and wait, up to $1 minutes after it goes down, until it is back with a new boot

@@ -6,11 +6,14 @@ Prepare a test guest's desktop for screenshots, and put it back afterwards.
 -Mode Prepare saves the current settings to C:\apptest\desktop, then sets the screenshot desktop:
 the wallpaper (Windows 11's dark bloom, img19.jpg, by default), desktop icons hidden, the taskbar
 search box, Widgets and app notifications off, every pin that Windows lets a script remove taken off
-the taskbar, dark mode for Windows and apps, transparency effects on, and the screen at 1920 x 1080 (not persisted, so
-a guest restart also returns it to its usual size). Running it again keeps the settings saved the
+the taskbar, dark mode for Windows and apps, transparency effects on, and a 1920 x 1080 desktop: the
+screen at 1920 x 1080 and 100% display scale, or with -Scale 200 at 3840 x 2160 and 200% (the screen
+size is not persisted, so a guest restart also returns it to its usual size). Running it again keeps the settings saved the
 first time, so a second Prepare never makes the screenshot desktop the one Restore returns to.
 
 Both modes first close any popup menu left open, so a stale menu cannot leak into captures or tests.
+Nothing depends on the display language: pins are found by the shell's own verb text for that
+language, so the script works the same in a guest switched to another language (guest-language.ps1).
 
 -Mode Restore puts every saved setting back, including the taskbar pins exactly as they were (any pin
 a test added is removed), and deletes the saved copy. It also works from a later session or after a
@@ -30,9 +33,14 @@ whether that is set but does not change it, because it needs a restart.
 .PARAMETER Mode Prepare or Restore.
 .PARAMETER Wallpaper File name in C:\Windows\Web\Wallpaper\Windows. Windows 10 has no img19.jpg;
 pass img0.jpg there.
-.PARAMETER Width Screen width to switch to for the session, in pixels (Store screenshots need at
-least 1366 x 768; the guest starts at 1280 x 800).
-.PARAMETER Height Screen height to switch to.
+.PARAMETER Width Desktop width for the session in logical pixels: the screen is switched to Width x
+Scale / 100 physical pixels (Store screenshots need at least 1366 x 768 logical; the guest starts at
+1280 x 800).
+.PARAMETER Height Desktop height, likewise.
+.PARAMETER Scale Display scale for the session, 100 or 200 percent. Store captures move to 200%,
+whose 3840 x 2160 capture the winui-app-kit renderer (v2.10.0 or later) crops in logical pixels and
+reduces to the Store size. Drive scripts size windows in physical pixels (Set-WindowCentered), so at
+200% they pass twice the 100% size.
 .PARAMETER State Folder for the saved settings; tests point it elsewhere.
 #>
 param(
@@ -40,6 +48,7 @@ param(
     [string]$Wallpaper = 'img19.jpg',
     [int]$Width = 1920,
     [int]$Height = 1080,
+    [ValidateSet(100, 200)] [int]$Scale = 100,
     [string]$State = 'C:\apptest\desktop'
 )
 $ErrorActionPreference = 'Stop'
@@ -70,6 +79,17 @@ public static class DesktopNative {
   }
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplaySettings(string device, int mode, ref DEVMODE dm);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibrary(string file);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int LoadString(IntPtr module, uint id, System.Text.StringBuilder text, int size);
+  // A string resource of a system DLL in the display language (Windows picks the matching MUI file).
+  public static string SystemString(string dll, uint id) {
+    var text = new System.Text.StringBuilder(512);
+    return LoadString(LoadLibrary(dll), id, text, text.Capacity) > 0 ? text.ToString() : null;
+  }
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT point, int flags);
+  [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   public static DEVMODE Current() {
     var dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
     if (!EnumDisplaySettings(null, -1, ref dm)) throw new InvalidOperationException("EnumDisplaySettings failed");
@@ -77,6 +97,52 @@ public static class DesktopNative {
   }
 }
 "@
+
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class DisplayScale {
+  [StructLayout(LayoutKind.Sequential)] public struct LUID { public uint Low; public int High; }
+  [StructLayout(LayoutKind.Sequential)] public struct HEADER { public int type; public int size; public LUID adapterId; public uint id; }
+  [StructLayout(LayoutKind.Sequential)] struct GET { public HEADER header; public int minRel; public int curRel; public int maxRel; }
+  [StructLayout(LayoutKind.Sequential)] struct SET { public HEADER header; public int rel; }
+  [StructLayout(LayoutKind.Sequential)] struct PATH_SOURCE { public LUID adapterId; public uint id; public uint modeInfoIdx; public uint statusFlags; }
+  [StructLayout(LayoutKind.Sequential)] struct PATH_TARGET { public LUID adapterId; public uint id; public uint modeInfoIdx; public int outputTechnology; public int rotation; public int scaling; public uint rrNum; public uint rrDen; public int scanLineOrdering; public bool targetAvailable; public uint statusFlags; }
+  [StructLayout(LayoutKind.Sequential)] struct PATH { public PATH_SOURCE source; public PATH_TARGET target; public uint flags; }
+  [StructLayout(LayoutKind.Sequential)] struct MODE { public int infoType; public uint id; public LUID adapterId; [MarshalAs(UnmanagedType.ByValArray, SizeConst = 48)] public byte[] data; }
+  [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+  [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint np, [Out] PATH[] p, ref uint nm, [Out] MODE[] m, IntPtr topology);
+  [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref GET request);
+  [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref SET request);
+
+  // The first active display's source (QDC_ONLY_ACTIVE_PATHS); the test guests have one display.
+  static HEADER Source(int type, int size) {
+    uint np, nm;
+    if (GetDisplayConfigBufferSizes(2, out np, out nm) != 0) throw new InvalidOperationException("GetDisplayConfigBufferSizes failed");
+    var paths = new PATH[np]; var modes = new MODE[nm];
+    int result = QueryDisplayConfig(2, ref np, paths, ref nm, modes, IntPtr.Zero);
+    if (result != 0 || np == 0) throw new InvalidOperationException("QueryDisplayConfig failed: " + result);
+    return new HEADER { type = type, size = size, adapterId = paths[0].source.adapterId, id = paths[0].source.id };
+  }
+
+  // The scale steps Windows allows for the display, relative to its recommended scale: min, current, max.
+  // Undocumented request (-3), the one Settings > Display > Scale uses.
+  public static int[] Steps() {
+    var request = new GET { header = Source(-3, Marshal.SizeOf(typeof(GET))) };
+    int result = DisplayConfigGetDeviceInfo(ref request);
+    if (result != 0) throw new InvalidOperationException("Reading the display scale failed: " + result);
+    return new[] { request.minRel, request.curRel, request.maxRel };
+  }
+
+  // Set the display's scale, as a step relative to its recommended scale (undocumented request -4).
+  public static void Set(int relative) {
+    var request = new SET { header = Source(-4, Marshal.SizeOf(typeof(SET))), rel = relative };
+    int result = DisplayConfigSetDeviceInfo(ref request);
+    if (result != 0) throw new InvalidOperationException("Setting the display scale failed: " + result);
+  }
+}
+"@
+# Per-monitor aware (v2), so the display scale and sizes read here are the display's real ones.
+[DesktopNative]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
 
 # Registry values the screenshot desktop sets, with the value each takes while prepared.
 $Settings = @(
@@ -91,6 +157,9 @@ $Settings = @(
     # The documented "Allow widgets" policy; the per-user TaskbarDa value is write-protected (UCPD).
     @{ Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh'; Name = 'AllowNewsAndInterests'; Value = 0 }
 )
+# Display scales Windows offers, in its own order; DisplayConfig addresses them as steps from the one
+# it recommends for the display.
+$ScaleSteps = @(100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500)
 $TaskbandKey = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband'
 $PinnedFolder = "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
 $StateFile = Join-Path $State 'state.json'
@@ -209,6 +278,46 @@ function Set-DisplaySize([string]$Size) {
     Start-Sleep -Seconds 3
 }
 
+<# The primary display's current scale, in percent (its effective DPI over 96). #>
+function Get-DisplayScale {
+    $point = New-Object DesktopNative+POINT
+    $monitor = [DesktopNative]::MonitorFromPoint($point, 1)   # MONITOR_DEFAULTTOPRIMARY
+    $x = [uint32]0; $y = [uint32]0
+    $result = [DesktopNative]::GetDpiForMonitor($monitor, 0, [ref]$x, [ref]$y)   # MDT_EFFECTIVE_DPI
+    if ($result -ne 0) { throw ("GetDpiForMonitor failed: 0x{0:X8}" -f $result) }
+    [int][Math]::Round($x * 100 / 96)
+}
+
+<#
+Set the primary display's scale to $Percent, as Settings > Display > Scale does, and wait until it
+applies. Windows addresses scales as steps from the one it recommends for the display, which depends
+on the screen size, so switch the screen size first. Throws when Windows does not offer $Percent at
+the current size (200% needs at least 1600 x 1200 or so). Windows keeps the choice for the display
+across restarts, so Restore sets the saved scale back.
+#>
+function Set-DisplayScale([int]$Percent) {
+    $current = Get-DisplayScale
+    if ($current -eq $Percent) { return }
+    $currentStep = [array]::IndexOf($ScaleSteps, $current)
+    $targetStep = [array]::IndexOf($ScaleSteps, $Percent)
+    if ($currentStep -lt 0 -or $targetStep -lt 0) { throw "Display scale $current% or $Percent% is not one Windows offers" }
+
+    $min, $now, $max = [DisplayScale]::Steps()
+    $relative = $targetStep - ($currentStep - $now)
+    if ($relative -lt $min -or $relative -gt $max) {
+        $recommended = $currentStep - $now
+        throw "Windows does not offer $Percent% at $(Get-DisplaySize): it offers $($ScaleSteps[$recommended + $min])% up to step $max from its recommended $($ScaleSteps[$recommended])%"
+    }
+    [DisplayScale]::Set($relative)
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-DisplayScale) -ne $Percent) {
+        if ((Get-Date) -gt $deadline) { throw "The display scale is still $(Get-DisplayScale)% 15 seconds after setting $Percent%" }
+        Start-Sleep -Milliseconds 500
+    }
+    Start-Sleep -Seconds 2
+}
+
 <#
 Restart this user's notification service (WpnUserService_<suffix>), so it rereads ToastEnabled: the
 running service ignores a changed value, and a toast still appeared until it was restarted.
@@ -221,11 +330,27 @@ function Restart-NotificationService {
     }
 }
 
-<# Unpin every app whose shell item offers "Unpin from taskbar", and return their names. #>
+<#
+The shell's "Unpin from taskbar" verb text in the display language, without its "&" access-key marker:
+shell32.dll string 5387, which the apps folder's items show as that verb (in German, "Von Taskleiste
+loesen" with an umlaut). Falls back to the English text if the string cannot be read.
+#>
+function Get-UnpinVerbText {
+    $text = [DesktopNative]::SystemString('shell32.dll', 5387)
+    if (-not $text) { $text = 'Unpin from taskbar' }
+    $text.Replace('&', '')
+}
+
+<#
+Unpin every app whose shell item offers the shell's "Unpin from taskbar" verb, and return their
+names. A shell item's verbs expose only their displayed text, so the verb is matched by the shell's
+own text for the display language (Get-UnpinVerbText).
+#>
 function Remove-TaskbarPins {
+    $unpin = Get-UnpinVerbText
     $apps = (New-Object -ComObject Shell.Application).NameSpace('shell:::{4234d49b-0245-4df3-b780-3893943456e1}').Items()
     foreach ($app in $apps) {
-        $verb = $app.Verbs() | Where-Object { $_.Name.Replace('&', '') -eq 'Unpin from taskbar' } | Select-Object -First 1
+        $verb = $app.Verbs() | Where-Object { $_.Name.Replace('&', '') -eq $unpin } | Select-Object -First 1
         if ($verb) {
             $verb.DoIt()
             $app.Name
@@ -256,6 +381,7 @@ function Save-DesktopState {
         Wallpaper = Get-RegistryValue 'HKCU:\Control Panel\Desktop' 'WallPaper'
         DesktopIcons = Test-DesktopIcons
         DisplaySize = Get-DisplaySize
+        DisplayScale = Get-DisplayScale
         Values = @($Settings | ForEach-Object { @{ Key = $_.Key; Name = $_.Name; Value = Get-RegistryValue $_.Key $_.Name } })
     }
     # The pin list lives in the Taskband key and the pinned shortcuts folder; keep both.
@@ -277,14 +403,16 @@ function Invoke-Prepare {
         Set-RegistryValue $setting.Key $setting.Name $setting.Value
     }
     $unpinned = @(Remove-TaskbarPins)
-    Set-DisplaySize "$($Width)x$($Height)"
+    # The size first: which scales Windows offers depends on it.
+    Set-DisplaySize "$($Width * $Scale / 100)x$($Height * $Scale / 100)"
+    Set-DisplayScale $Scale
     Restart-NotificationService
     Restart-Explorer
     Set-DesktopIcons $false
     Set-Wallpaper $wallpaperPath
     Send-ThemeChange
 
-    Write-Output "prepared: wallpaper $Wallpaper, dark mode for Windows and apps, transparency on, screen $(Get-DisplaySize), notifications off, desktop icons, search box and Widgets hidden"
+    Write-Output "prepared: wallpaper $Wallpaper, dark mode for Windows and apps, transparency on, screen $(Get-DisplaySize) at $(Get-DisplayScale)%, notifications off, desktop icons, search box and Widgets hidden"
     if ($unpinned) { Write-Output "unpinned: $($unpinned -join ', ')" }
     Write-EffectsStatus
 }
@@ -318,6 +446,8 @@ function Invoke-Restore {
         Set-RegistryValue $value.Key $value.Name $value.Value
     }
     Restore-TaskbarPins
+    # The scale first, while the larger screen still offers it; then the size.
+    if ($saved.DisplayScale) { Set-DisplayScale ([int]$saved.DisplayScale) }
     if ($saved.DisplaySize) { Set-DisplaySize $saved.DisplaySize }
     Restart-NotificationService
     Restart-Explorer

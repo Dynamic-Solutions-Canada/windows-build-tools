@@ -11,12 +11,15 @@ public static class UiMenu {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr h, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object obj);
+  [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern int GetMenuItemID(IntPtr menu, int position);
 
-  public class Item { public int Index; public string Name; public bool Enabled; }
+  // Position is the item's zero-based place in the menu, separators included. Id is its command
+  // ID, the number the app gave it, which is the same in every display language; -1 for a submenu.
+  public class Item { public int Index; public int Position; public int Id; public string Name; public bool Enabled; }
 
-  // The open popup menu's client accessible object (OBJID_CLIENT), or null when no menu is open.
-  // The topmost visible #32768 window is the most recently opened (sub)menu.
-  static Accessibility.IAccessible OpenMenu() {
+  // The topmost visible #32768 window, the most recently opened (sub)menu, or IntPtr.Zero.
+  static IntPtr MenuWindow() {
     IntPtr found = IntPtr.Zero;
     EnumWindows((h, l) => {
       var name = new StringBuilder(16);
@@ -24,6 +27,12 @@ public static class UiMenu {
       if (name.ToString() == "#32768" && IsWindowVisible(h)) { found = h; return false; }
       return true;
     }, IntPtr.Zero);
+    return found;
+  }
+
+  // The open popup menu's client accessible object (OBJID_CLIENT), or null when no menu is open.
+  static Accessibility.IAccessible OpenMenu() {
+    IntPtr found = MenuWindow();
     if (found == IntPtr.Zero) return null;
     Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");   // IID_IAccessible
     object acc;
@@ -35,14 +44,18 @@ public static class UiMenu {
   public static bool IsOpen() { return OpenMenu() != null; }
 
   // The open menu's items, without separators (role 21); empty when no menu is open.
+  // MSAA child N is the menu's item at position N - 1 (separators are children too), and a menu
+  // handle (MN_GETHMENU) is valid in any process of the session, so the command IDs are read from it.
   public static List<Item> Items() {
     var items = new List<Item>();
     var menu = OpenMenu();
     if (menu == null) return items;
+    IntPtr handle = SendMessage(MenuWindow(), 0x01E1, IntPtr.Zero, IntPtr.Zero);   // MN_GETHMENU
     for (int child = 1; child <= menu.accChildCount; child++) {
       if ((int)menu.get_accRole(child) != 12) continue;   // ROLE_SYSTEM_MENUITEM
       int state = (int)menu.get_accState(child);
-      items.Add(new Item { Index = child, Name = menu.get_accName(child), Enabled = (state & 0x1) == 0 });   // STATE_SYSTEM_UNAVAILABLE
+      int id = handle == IntPtr.Zero ? -1 : GetMenuItemID(handle, child - 1);
+      items.Add(new Item { Index = child, Position = child - 1, Id = id, Name = menu.get_accName(child), Enabled = (state & 0x1) == 0 });   // STATE_SYSTEM_UNAVAILABLE
     }
     return items;
   }
@@ -60,6 +73,7 @@ Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class UiNative {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -80,7 +94,13 @@ public static class UiNative {
   public static extern bool SystemParametersInfo(int action, int param, ref HIGHCONTRAST hc, int winIni);
 }
 "@
-[UiNative]::SetProcessDPIAware() | Out-Null
+# Per-monitor aware (v2), so every coordinate this script reads or sets is in physical pixels at any
+# display scale. A system-aware process would see logical sizes after a scale change made in the same
+# sign-in (screenshot-desktop.ps1 -Scale 200), since its system DPI is fixed at sign-in. Plain
+# SetProcessDPIAware is the fallback for Windows builds without DPI awareness contexts.
+if (-not [UiNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {   # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    [UiNative]::SetProcessDPIAware() | Out-Null
+}
 $UiA = [System.Windows.Automation.AutomationElement]
 $UiRoot = $UiA::RootElement
 $UiOut = "C:\apptest\out"
@@ -119,7 +139,52 @@ function Get-AppWindows([string]$ProcessName) {
     }
 }
 
-<# First descendant with this name, optionally of this control type (e.g. ListItem). #>
+<#
+File Explorer's open folder windows, as UI Automation elements: top-level windows of class
+CabinetWClass owned by explorer.exe. Found by class and process, never by title, which is the folder's
+translated display name ("This PC" is "Dieser PC" in German). With -Path, only windows that have a tab
+showing that folder (compared as full paths, case-insensitively; read through Shell.Application, whose
+paths do not depend on the display language). Waits up to -TimeoutSeconds for one to appear, then
+returns what it found, possibly nothing.
+#>
+function Get-ExplorerWindows([string]$Path = $null, [int]$TimeoutSeconds = 0) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $isFolder = New-Object System.Windows.Automation.PropertyCondition($UiA::ClassNameProperty, 'CabinetWClass')
+    while ($true) {
+        $explorer = @(Get-Process explorer -ErrorAction SilentlyContinue | ForEach-Object Id)
+        $windows = @($UiRoot.FindAll("Children", $isFolder) | Where-Object { $explorer -contains $_.Current.ProcessId })
+        if ($Path) {
+            $wanted = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+            $handles = @((New-Object -ComObject Shell.Application).Windows() | Where-Object {
+                    try { [IO.Path]::GetFullPath($_.Document.Folder.Self.Path).TrimEnd('\') -eq $wanted } catch { $false }
+                } | ForEach-Object { [int64]$_.HWND })
+            $windows = @($windows | Where-Object { $handles -contains [int64]$_.Current.NativeWindowHandle })
+        }
+        if ($windows.Count -gt 0 -or (Get-Date) -ge $deadline) {
+            return $windows
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+<#
+First descendant with this AutomationId (x:Name or AutomationProperties.AutomationId in XAML),
+optionally of this control type (e.g. Button), or $null. Prefer this to Find-ByName: an ID is the
+same in every display language, so a drive script that uses IDs captures every Store locale.
+#>
+function Find-ById($Element, [string]$AutomationId, [string]$Type = $null) {
+    $cond = New-Object System.Windows.Automation.PropertyCondition($UiA::AutomationIdProperty, $AutomationId)
+    $Element.FindAll("Descendants", $cond) |
+        Where-Object { -not $Type -or $_.Current.ControlType.ProgrammaticName -eq "ControlType.$Type" } |
+        Select-Object -First 1
+}
+
+<#
+First descendant with this name, optionally of this control type (e.g. ListItem), or $null. Names
+are the displayed, translated text, so a lookup by name works in one display language only: use it
+only for an element with no AutomationId (give the element one in the app where you can), and pass
+the name for the language being captured.
+#>
 function Find-ByName($Element, [string]$Name, [string]$Type = $null) {
     $cond = New-Object System.Windows.Automation.PropertyCondition($UiA::NameProperty, $Name)
     $Element.FindAll("Descendants", $cond) |
@@ -136,13 +201,24 @@ function Invoke-Click($Element) {
     [UiNative]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
-<# Choose an option in a combo box by a regex on its text. #>
-function Select-ComboOption($Combo, [string]$Match) {
+<#
+Choose an option in a combo box: by a regex on its text ($Match), or by its zero-based place in the
+list (-Index), which is the same in every display language. Text matches one language only.
+#>
+function Select-ComboOption($Combo, [string]$Match, [int]$Index = -1) {
+    if ([string]::IsNullOrEmpty($Match) -eq ($Index -lt 0)) { throw "Select-ComboOption: pass either a text match or -Index" }
     $Combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
     Start-Sleep -Seconds 1
     $cond = New-Object System.Windows.Automation.PropertyCondition($UiA::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
-    $item = $Combo.FindAll("Descendants", $cond) | Where-Object { $_.Current.Name -match $Match } | Select-Object -First 1
-    if (-not $item) { throw "No option matching '$Match'" }
+    $options = @($Combo.FindAll("Descendants", $cond))
+    if ($Index -ge 0) {
+        if ($Index -ge $options.Count) { throw "No option at index $Index (the list has $($options.Count))" }
+        $item = $options[$Index]
+    }
+    else {
+        $item = $options | Where-Object { $_.Current.Name -match $Match } | Select-Object -First 1
+        if (-not $item) { throw "No option matching '$Match'" }
+    }
     $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
     Start-Sleep -Seconds 2
 }
@@ -317,7 +393,8 @@ function Find-TrayIcon([string]$TooltipPrefix) {
 
 <#
 The items of the open popup menu (a tray icon's menu, a window's Alt+Space menu, or any other
-standard Win32 menu), as objects with Index, Name and Enabled; separators are left out. Returns an
+standard Win32 menu), as objects with Index (the MSAA child), Position (zero-based, counting
+separators), Id (the command ID, -1 for a submenu), Name and Enabled; separators are left out. Returns an
 empty list when no menu is open. Reads them through MSAA, because the managed UI Automation client
 shows a #32768 menu as an empty pane; native UI Automation and Narrator read them through the
 system's menu proxy, so this is a limit of this script's client, not of the app.
@@ -327,16 +404,31 @@ function Get-MenuItems {
 }
 
 <#
-Choose an item of the open popup menu by its text, ignoring the "&" access-key marker and any
-shortcut text after a tab. Throws when no menu is open, or no enabled item has that text. Open the
-menu yourself immediately before calling this: it acts on whichever popup menu is open, which could
-be one left by something else.
+Choose an item of the open popup menu. -Id (the item's command ID, as Get-MenuItems lists it) and
+-Position (its zero-based place, separators included) are the same in every display language; a
+name, compared without the "&" access-key marker and any shortcut text after a tab, is the
+translated text and works in one language only. Throws when no menu is open, or no enabled item
+matches. Open the menu yourself immediately before calling this: it acts on whichever popup menu is
+open, which could be one left by something else.
 #>
-function Invoke-MenuItem([string]$Name) {
+function Invoke-MenuItem([string]$Name, [int]$Id = -1, [int]$Position = -1) {
+    $given = @(@([bool]$Name, ($Id -ge 0), ($Position -ge 0)) | Where-Object { $_ })
+    if ($given.Count -ne 1) { throw "Invoke-MenuItem: pass exactly one of a name, -Id or -Position" }
     if (-not [UiMenu]::IsOpen()) { throw "No popup menu is open" }
     $items = @(Get-MenuItems)
-    $item = $items | Where-Object { $_.Enabled -and $_.Name.Replace('&', '').Split("`t")[0] -eq $Name } | Select-Object -First 1
-    if (-not $item) { throw "The open menu has no enabled item '$Name' (items: $(($items | ForEach-Object Name) -join ', '))" }
+    if ($Id -ge 0) {
+        $item = $items | Where-Object { $_.Enabled -and $_.Id -eq $Id } | Select-Object -First 1
+        $wanted = "with ID $Id"
+    }
+    elseif ($Position -ge 0) {
+        $item = $items | Where-Object { $_.Enabled -and $_.Position -eq $Position } | Select-Object -First 1
+        $wanted = "at position $Position"
+    }
+    else {
+        $item = $items | Where-Object { $_.Enabled -and $_.Name.Replace('&', '').Split("`t")[0] -eq $Name } | Select-Object -First 1
+        $wanted = "'$Name'"
+    }
+    if (-not $item) { throw "The open menu has no enabled item $wanted (items: $(($items | ForEach-Object { "$($_.Position):$($_.Id):$($_.Name)" }) -join ', '))" }
     [UiMenu]::Choose($item.Index) | Out-Null
     Start-Sleep -Milliseconds 500
 }

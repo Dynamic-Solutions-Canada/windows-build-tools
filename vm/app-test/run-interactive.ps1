@@ -16,12 +16,32 @@ param(
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
+
+<#
+The script's own output from a transcript: the lines between the begin and end markers the task
+writes, so the transcript's header and footer drop out in any display language (their labels, such
+as "Start time", are translated: "Startzeit" in German). PowerShell's "PS>TerminatingError" echo lines
+are dropped too. A transcript cut off before the end marker (a timeout) gives everything after the
+begin marker; one with no begin marker gives nothing.
+#>
+function Select-TranscriptOutput([string[]]$Lines, [string]$Begin, [string]$End) {
+    $inside = $false
+    foreach ($line in $Lines) {
+        if ($line -eq $Begin) { $inside = $true; continue }
+        if ($line -eq $End) { return }
+        if ($inside -and $line -notmatch '^PS>TerminatingError') { $line }
+    }
+}
+
 $name = "apptest-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
 $log = "C:\apptest\out\$name.log"
 New-Item -ItemType Directory -Force C:\apptest\out | Out-Null
 
-# The task's own command line: run the script with a transcript, so its output can be printed here.
-$command = "Start-Transcript -Path '$log' | Out-Null; try { & '$Script' } catch { Write-Output ('ERROR: ' + `$_) }; Stop-Transcript | Out-Null"
+# The task's own command line: run the script with a transcript, so its output can be printed here,
+# between two markers that set it apart from the transcript's own header and footer.
+$begin = "apptest-output-begin-$name"
+$end = "apptest-output-end-$name"
+$command = "Start-Transcript -Path '$log' | Out-Null; Write-Output '$begin'; try { & '$Script' } catch { Write-Output ('ERROR: ' + `$_) }; Write-Output '$end'; Stop-Transcript | Out-Null"
 # Through a headless console host: Windows 11 hands a plain console program to Windows Terminal,
 # which ignores -WindowStyle Hidden and leaves a terminal button on the taskbar of every capture.
 $action = New-ScheduledTaskAction -Execute "conhost.exe" -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"$command`""
@@ -46,8 +66,7 @@ finally {
 }
 
 if (Test-Path $log) {
-    # Drop the transcript's header and footer blocks.
-    Get-Content $log | Where-Object { $_ -notmatch '^PS>TerminatingError' -and $_ -notmatch '^\*{10,}|^(Windows PowerShell transcript|Start time|End time|Username|RunAs User|Configuration Name|Machine|Host Application|Process ID|PSVersion|PSEdition|PSCompatibleVersions|BuildVersion|CLRVersion|WSManStackVersion|PSRemotingProtocolVersion|SerializationVersion|Transcript started)' }
+    Select-TranscriptOutput (Get-Content $log) $begin $end
 }
 else {
     Write-Output "No transcript: the task did not start in the desktop session (is a user signed in?)"

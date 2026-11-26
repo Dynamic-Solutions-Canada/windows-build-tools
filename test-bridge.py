@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -397,6 +398,129 @@ New-Fake 'Microsoft.DesktopAppInstaller_1.27.0.0_x64__8wekyb3d8bbwe' @('{framewo
             self.assertIn(x86_framework, left)
             self.assertNotIn(main.format(994), left)
             self.assertFalse(record.exists())
+
+
+class AppTestLanguageNeutralTests(unittest.TestCase):
+    """The app-test helpers work in any guest display language, in the host's Windows PowerShell 5.1,
+    which the guests run. Nothing here opens a window, takes focus or changes the host's settings:
+    functions are loaded from the scripts' syntax trees, and guest-language.ps1 runs against fakes."""
+
+    APP_TEST_DIR = BRIDGE.parent / 'vm/app-test'
+
+    windows = staticmethod(AppTestPackageTests.windows)
+
+    def run_powershell(self, script):
+        """Run script in powershell.exe (5.1) and return its stdout; fail the test on a nonzero exit."""
+        if shutil.which('powershell.exe') is None:
+            self.skipTest('needs the Windows host powershell.exe')
+        # From a file, not stdin: stdin input ends multi-line constructs such as here-strings early.
+        # UTF-8 with a byte order mark, which Windows PowerShell 5.1 needs to read it as UTF-8.
+        with tempfile.TemporaryDirectory(prefix='app-test-ps-') as directory:
+            path = Path(directory) / 'test.ps1'
+            path.write_text(script, encoding='utf-8-sig')
+            result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                                     '-File', self.windows(path)], capture_output=True, text=True, timeout=120)
+        output = result.stdout.replace('\r', '')
+        self.assertEqual(result.returncode, 0, output + result.stderr)
+        return output
+
+    def load_function(self, script, name):
+        """PowerShell that defines one function from script, without running the script itself."""
+        return (f"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{self.windows(script)}', [ref]$null, [ref]$null)\n"
+                f"$fn = $ast.Find({{ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq '{name}' }}, $true)\n"
+                "Invoke-Expression $fn.Extent.Text\n")
+
+    def test_transcript_output_is_found_by_markers_not_by_english_header_labels(self):
+        """A German transcript's header and footer drop out; the script's output and errors stay."""
+        transcript = '\n'.join([
+            '**********************',
+            'Windows PowerShell-Transkriptstart',
+            'Startzeit: 20261125192311',
+            'Benutzername: WINDOWS\\Docker',
+            'Computer: WINDOWS (Microsoft Windows NT 10.0.26200.0)',
+            '**********************',
+            'apptest-output-begin-apptest-1',
+            'captured: 01-home-dark.png',
+            'PS>TerminatingError(): "Fehler"',
+            'ERROR: Fehler',
+            'apptest-output-end-apptest-1',
+            '**********************',
+            'Windows PowerShell-Transkriptende',
+            'Endzeit: 20261125192320',
+            '**********************',
+        ])
+        output = self.run_powershell(
+            self.load_function(self.APP_TEST_DIR / 'run-interactive.ps1', 'Select-TranscriptOutput') +
+            f"$lines = @'\n{transcript}\n'@ -split \"`n\"\n"
+            "Select-TranscriptOutput $lines 'apptest-output-begin-apptest-1' 'apptest-output-end-apptest-1'\n"
+            "'---'\n"
+            "Select-TranscriptOutput ($lines | Select-Object -First 9) 'apptest-output-begin-apptest-1' 'apptest-output-end-apptest-1'\n")
+        complete, cut_off = output.split('---\n')
+        self.assertEqual(complete.splitlines(), ['captured: 01-home-dark.png', 'ERROR: Fehler'])
+        self.assertEqual(cut_off.splitlines(), ['captured: 01-home-dark.png'])
+
+    def test_menu_and_combo_choices_take_exactly_one_kind_of_key(self):
+        """A name, command ID or position: one of them, so a language-neutral call cannot silently match by text."""
+        ui_lib = self.APP_TEST_DIR / 'ui-lib.ps1'
+        output = self.run_powershell(
+            self.load_function(ui_lib, 'Invoke-MenuItem') + self.load_function(ui_lib, 'Select-ComboOption') + """
+foreach ($call in { Invoke-MenuItem }, { Invoke-MenuItem 'Quit' -Id 5 }, { Invoke-MenuItem -Id 5 -Position 1 },
+                  { Select-ComboOption $null }, { Select-ComboOption $null 'Dark' -Index 1 }) {
+    try { & $call; 'accepted' } catch { "$_" }
+}
+""")
+        self.assertEqual(output.splitlines(), ['Invoke-MenuItem: pass exactly one of a name, -Id or -Position'] * 3 +
+                         ['Select-ComboOption: pass either a text match or -Index'] * 2)
+
+    # Every cmdlet guest-language.ps1 may call to change settings, faked so the host's own are never touched.
+    LANGUAGE_FAKES = r"""
+$global:Calls = [System.Collections.ArrayList]@()
+function Get-InstalledLanguage { ,[System.Collections.Generic.List[object]]@(@('en-US', 'de-DE', 'ja-JP') | ForEach-Object { [pscustomobject]@{ LanguageId = $_ } }) }
+function New-WinUserLanguageList($Language) {
+    $tips = [System.Collections.Generic.List[string]]@('default-tip-' + $Language)
+    ,[System.Collections.Generic.List[object]]@([pscustomobject]@{ LanguageTag = $Language; InputMethodTips = $tips })
+}
+function Set-WinUserLanguageList($LanguageList, [switch]$Force) { $global:Calls.Add("list $($LanguageList[0].LanguageTag) $($LanguageList[0].InputMethodTips -join ',')") | Out-Null }
+function Set-WinUILanguageOverride($Language) { $global:Calls.Add("display $Language") | Out-Null }
+function Set-WinDefaultInputMethodOverride($InputTip) { $global:Calls.Add("input $InputTip") | Out-Null }
+function Set-WinHomeLocation($GeoId) { $global:Calls.Add("home $GeoId") | Out-Null }
+function Set-Culture($CultureInfo) { $global:Calls.Add("format $CultureInfo") | Out-Null }
+function Show-LanguageSettings { }
+"""
+    FAKED = {'Set-WinUserLanguageList', 'Set-WinUILanguageOverride', 'Set-WinDefaultInputMethodOverride',
+             'Set-WinHomeLocation', 'Set-Culture'}
+
+    def switch_language(self, arguments):
+        """Run guest-language.ps1 with arguments against the fakes; return the settings it changed, in order."""
+        script = self.APP_TEST_DIR / 'guest-language.ps1'
+        # Refuse to run if the script calls a setter the fakes do not cover: it would change this PC.
+        setters = set(re.findall(r'\b(Set-Win\w+|Set-Culture|Set-ItemProperty|Copy-UserInternationalSettingsToSystem)\b',
+                                 script.read_text()))
+        self.assertLessEqual(setters, self.FAKED, 'guest-language.ps1 calls a setter the test does not fake')
+        # Show-LanguageSettings is redefined by the script, so the fakes are loaded into its functions'
+        # scope by running the script's body in this one, with its own Show-LanguageSettings removed.
+        output = self.run_powershell(self.LANGUAGE_FAKES + f"""
+$body = (Get-Content -Raw '{self.windows(script)}') -replace '(?s)function Show-LanguageSettings \\{{.*?\\n\\}}', ''
+$block = [scriptblock]::Create($body)
+try {{ & $block {arguments} }} catch {{ 'refused: ' + $_ }}
+'calls: ' + ($global:Calls -join '; ')
+""")
+        return output
+
+    def test_an_ime_language_gets_one_plain_keyboard_and_its_home_location(self):
+        output = self.switch_language('-Language ja-JP')
+        self.assertIn('calls: list ja-JP 0411:00000411; display ja-JP; input 0411:00000411; home 122; format ja-JP', output)
+
+    def test_other_languages_keep_their_default_keyboard_and_en_us_restores(self):
+        self.assertIn('calls: list de-DE default-tip-de-DE; display de-DE; input default-tip-de-DE; home 94; format de-DE',
+                      self.switch_language('-Language de-DE'))
+        self.assertIn('calls: list en-US default-tip-en-US; display en-US; input default-tip-en-US; home 244; format en-US',
+                      self.switch_language('-Language en-US'))
+
+    def test_a_language_without_its_pack_is_refused_before_anything_changes(self):
+        output = self.switch_language('-Language fr-FR')
+        self.assertIn('refused: The fr-FR language pack is not installed', output)
+        self.assertIn('calls: \n', output)
 
 
 class StageCleanupTests(unittest.TestCase):
