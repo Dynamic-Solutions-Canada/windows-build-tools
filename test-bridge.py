@@ -475,7 +475,7 @@ foreach ($call in { Invoke-MenuItem }, { Invoke-MenuItem 'Quit' -Id 5 }, { Invok
     # Every cmdlet guest-language.ps1 may call to change settings, faked so the host's own are never touched.
     LANGUAGE_FAKES = r"""
 $global:Calls = [System.Collections.ArrayList]@()
-function Get-InstalledLanguage { ,[System.Collections.Generic.List[object]]@(@('en-US', 'de-DE', 'ja-JP') | ForEach-Object { [pscustomobject]@{ LanguageId = $_ } }) }
+function Get-InstalledLanguage { ,[System.Collections.Generic.List[object]]@(@('en-US', 'de-DE', 'ja-JP', 'zh-CN') | ForEach-Object { [pscustomobject]@{ LanguageId = $_ } }) }
 function New-WinUserLanguageList($Language) {
     $tips = [System.Collections.Generic.List[string]]@('default-tip-' + $Language)
     ,[System.Collections.Generic.List[object]]@([pscustomobject]@{ LanguageTag = $Language; InputMethodTips = $tips })
@@ -508,8 +508,12 @@ try {{ & $block {arguments} }} catch {{ 'refused: ' + $_ }}
         return output
 
     def test_an_ime_language_gets_one_plain_keyboard_and_its_home_location(self):
+        output = self.switch_language('-Language zh-CN')
+        self.assertIn('calls: list zh-CN 0804:00000409; display zh-CN; input 0804:00000409; home 45; format zh-CN', output)
+
+    def test_japanese_keeps_its_ime_since_windows_has_no_plain_japanese_keyboard(self):
         output = self.switch_language('-Language ja-JP')
-        self.assertIn('calls: list ja-JP 0411:00000411; display ja-JP; input 0411:00000411; home 122; format ja-JP', output)
+        self.assertIn('calls: list ja-JP default-tip-ja-JP; display ja-JP; input default-tip-ja-JP; home 122; format ja-JP', output)
 
     def test_other_languages_keep_their_default_keyboard_and_en_us_restores(self):
         self.assertIn('calls: list de-DE default-tip-de-DE; display de-DE; input default-tip-de-DE; home 94; format de-DE',

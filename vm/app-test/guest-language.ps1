@@ -17,13 +17,14 @@ or app_test_language on the host, which does both); it changes per-user settings
 the same user as the desktop session. Leaves the system locale, the welcome screen and the time zone
 alone.
 
-Keyboards: a language whose default keyboard is an input method editor (IME), such as ja-JP and
-zh-CN, gets a plain keyboard layout instead (see $PlainKeyboards). An IME turns typed text into
-composition that waits for confirmation, so automated typing would be held or converted, and it shows
-an input-mode indicator ("A" or a character) in the taskbar's notification area, which would appear
-in every Store capture. With one language and one plain keyboard, Windows shows no input indicator.
-Pass -Keyboard to choose another input method tip ("<language id>:<layout>", as Get-WinUserLanguageList
-shows them).
+Keyboards: zh-CN, whose default keyboard is an input method editor (IME), gets the plain US layout
+instead (see $PlainKeyboards), so no IME holds typed text. ja-JP keeps its Microsoft IME: Windows
+offers no plain keyboard for Japanese, and the plain layout 0411:00000411 left the language with no
+keyboard at all, so the next sign-in loaded the Chinese IME and its taskbar indicator instead (November
+25, 2026). The Japanese IME starts in direct input, so automated typing (SendKeys or keybd_event)
+arrives as typed, but it shows its input-mode indicator ("A") in the taskbar's notification area; see
+the README's "Localized captures". Pass -Keyboard to choose another input method tip ("<language
+id>:<layout>", as Get-WinUserLanguageList shows them).
 
 Run with -Show to print the current settings without changing anything.
 
@@ -51,9 +52,8 @@ $HomeLocations = @{
 }
 
 # Plain keyboard layouts for languages whose default keyboard is an IME (see the description):
-# Japanese with the Japanese keyboard layout and no IME, and Chinese (Simplified) with the US layout.
+# Chinese (Simplified) with the US layout. Not ja-JP: Windows has no plain Japanese keyboard.
 $PlainKeyboards = @{
-    'ja-JP' = '0411:00000411'
     'zh-CN' = '0804:00000409'
 }
 
