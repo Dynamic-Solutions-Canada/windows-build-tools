@@ -269,11 +269,13 @@ app_test_lock() {
     local tools minutes log
     tools="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     minutes="${APP_TEST_LOCK_MINUTES:-60}"
-    log="$(_app_test_lock_file).holder.log"
-    # Create the directory and empty the log before starting, so the wait below can never read a
-    # previous holder's "holding" line, and the first use on a new machine does not fail.
-    mkdir -p "$(dirname "$log")"
-    : >"$log"
+    # Each request gets its own holder log: a shared one was emptied by every new request, so a
+    # second agent queuing for the lock erased the first one's "holding" line and left it waiting
+    # forever while it held the lock. A fresh file also means the wait below can never read a
+    # previous holder's line. Logs older than a day are removed.
+    mkdir -p "$(dirname "$(_app_test_lock_file)")"
+    find "$(dirname "$(_app_test_lock_file)")" -maxdepth 1 -name 'vm-windows-dev.lock.holder.*.log' -mtime +1 -delete 2>/dev/null
+    log="$(mktemp "$(_app_test_lock_file).holder.XXXXXX.log")"
     setsid python3 -I -c "
 import sys, time
 sys.path.insert(0, sys.argv[1])
